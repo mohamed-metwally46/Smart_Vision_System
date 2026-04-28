@@ -110,3 +110,8 @@ serviceAccount.json
 # =========================
 docker-compose.override.yml
 ```
+# Ignore Large AI Datasets
+weapon-detection-1/
+
+# Optional: General Python ignores you might need
+__pycache__/
