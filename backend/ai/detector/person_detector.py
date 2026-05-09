@@ -114,12 +114,16 @@ class PersonDetector:
             return []
 
         try:
+            # Optimized for 2GB VRAM:
+            # - half=True: Uses FP16 inference, significantly reducing VRAM usage and increasing speed on GPUs.
+            is_cuda = next(self._model.parameters()).is_cuda
             results = self._model.predict(
                 source=frame,
                 imgsz=self._imgsz,
                 conf=self._confidence_threshold,
                 classes=[PERSON_CLASS_ID],
                 verbose=False,
+                half=is_cuda,  # Enable FP16 only on GPU
             )
         except Exception as exc:
             logger.error("YOLO inference failed: %s", exc, exc_info=True)

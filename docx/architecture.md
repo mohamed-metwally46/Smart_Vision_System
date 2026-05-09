@@ -241,7 +241,43 @@ This ensures all AI components remain modular while producing a unified output.
 
 ---
 
-# 5. Backend Service Layer
+# 5. AI Experimentation & Pipeline Management
+
+For a graduation project, it is critical to have a robust and reproducible model development lifecycle. This layer manages the offline phases of the AI lifecycle: dataset preparation and model training.
+
+## 5.1 Dataset Management
+
+The system uses a dedicated manager to handle dataset acquisition and integrity.
+
+### Responsibilities
+- Securely download datasets from Roboflow using API keys.
+- Validate dataset directory structures.
+- Normalize `data.yaml` paths for cross-platform compatibility (Windows/Linux).
+- Ensure class consistency across different training versions.
+
+### Main Component
+```bash id="ds_mgr"
+dataset/dataset_manager.py
+```
+
+## 5.2 Training & Experimentation Pipeline
+
+A structured pipeline is used to fine-tune YOLOv8 models for specialized tasks (e.g., weapon detection).
+
+### Core Features
+- **Argument-Driven Training**: Hyperparameters (LR, epochs, batch size) are controlled via CLI for easy experimentation.
+- **Experiment Tracking**: Each training run is automatically versioned and logged.
+- **Metadata Logging**: Saves `experiment_config.json` containing base models, hyperparameters, and results paths.
+- **Early Stopping**: Integrated patience mechanisms to prevent overfitting and optimize compute resources.
+
+### Main Component
+```bash id="train_pipe"
+models/train_pipeline.py
+```
+
+---
+
+# 6. Backend Service Layer
 
 The Backend Layer coordinates:
 
