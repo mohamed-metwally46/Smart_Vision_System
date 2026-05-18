@@ -1,0 +1,142 @@
+# ── Smart Vision System — Docker Compose (Development) ────────────────────────
+#
+# Starts the full stack locally:
+#   postgres  → database
+#   redis     → message broker + pub/sub
+#   backend   → FastAPI + AI pipeline (hot-reload)
+#   celery    → camera workers
+#   alert_worker → alert persistence worker
+#
+# Usage:
+#   docker compose up -d          # start all services
+#   docker compose logs -f        # follow all logs
+#   docker compose down           # stop all services
+#   docker compose down -v        # stop + delete volumes (fresh start)
+
+services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: svs_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: svs
+      POSTGRES_PASSWORD: svs
+      POSTGRES_DB: svs
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U svs -d svs"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: svs_redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI Backend ───────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: svs_backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_URL: postgresql+asyncpg://svs:svs@postgres:5432/svs
+      REDIS_URL: redis://redis:6379/0
+      DEBUG: "true"
+    volumes:
+      - ./backend:/app          # hot-reload: code changes reflect immediately
+      - ./models:/app/models    # model weights shared with workers
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      uvicorn backend.app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Celery Camera Workers ─────────────────────────────────────────────────────
+  # Handles per-camera AI inference tasks dispatched by the REST API.
+  celery_cameras:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: svs_celery_cameras
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_URL: postgresql+asyncpg://svs:svs@postgres:5432/svs
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+      - ./models:/app/models
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command: >
+      celery -A backend.app.workers.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      -Q cameras
+
+  # ── Celery Alert Worker ───────────────────────────────────────────────────────
+  # Singleton worker: subscribes to Redis alert + frame channels,
+  # persists Alert and Event rows to PostgreSQL.
+  celery_alerts:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: svs_celery_alerts
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_URL: postgresql+asyncpg://svs:svs@postgres:5432/svs
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+      - ./models:/app/models
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command: >
+      celery -A backend.app.workers.celery_app worker
+      --loglevel=info
+      --concurrency=1
+      -Q alerts
+
+volumes:
+  postgres_data:
+  redis_data:

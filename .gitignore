@@ -1,56 +1,40 @@
-```gitignore
-# =====================================================
-# SMART VISION SYSTEM - .gitignore
-# =====================================================
+# ── Smart Vision System — .gitignore ─────────────────────────────────────────
 
-# =========================
-# Environment Variables
-# =========================
+# ── Environment / secrets ─────────────────────────────────────────────────────
 .env
-.env.*
-!.env.example
+*.env.local
 
-# =========================
-# Python Backend
-# =========================
-backend/__pycache__/
-backend/**/*.py[cod]
-backend/**/*.pyo
-backend/**/*.pyd
-backend/.pytest_cache/
-backend/.mypy_cache/
-backend/.coverage
-backend/htmlcov/
-
-# Virtual Environments
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
 venv/
 .venv/
-backend/venv/
-backend/.venv/
+env/
+.env/
 
-# =========================
-# Logs
-# =========================
-logs/
-*.log
-backend/logs/
+# ── AI model weights (large binary files — store separately or in DVC) ────────
+models/*.pt
+models/*.pth
+models/*.onnx
 
-# =========================
-# AI Models / Weights
-# =========================
-models/
-*.pt
-*.pth
-*.onnx
-*.engine
-*.ckpt
+# Keep the README
+!models/README.md
 
 # Allow tracking of python scripts in models
 !models/*.py
 
-# =========================
-# Datasets / Generated Data
-# =========================
+# ── Heatmaps (generated at runtime) ──────────────────────────────────────────
+backend/static/heatmaps/
+
+# ── Datasets / Generated Data ────────────────────────────────────────────────
 data/
 datasets/
 *.csv
@@ -62,3 +46,31 @@ weapon-detection-1/
 
 # Allow tracking of python scripts in dataset
 !dataset/*.py
+
+# ── Alembic generated migrations (commit these to git) ───────────────────────
+# backend/app/db/migrations/versions/*.py  ← DO commit these
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+.docker/
+
+# ── Node / Next.js ────────────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+frontend/.env.local
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+*.xml
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ── Videos ────────────────────────────────────────────────────────────────────
+*.mp4

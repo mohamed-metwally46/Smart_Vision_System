@@ -3,16 +3,8 @@ pipeline.py
 -----------
 Single orchestration point for the AI layer.
 
-Public surface:  pipeline.process_frame(frame) -> PipelineResult
-
-This is the ONLY file camera_worker.py should import from the ai/ package.
-All other ai/ modules are internal implementation details.
-
-Design constraints (from handoff):
-  - pipeline.py is the integration point; if something breaks, start here
-  - ai/ module is pure Python — no FastAPI imports anywhere in this file
-  - All exceptions caught here; workers must never crash due to a single bad frame
-  - Business logic events are collected from pluggable analyzers registered at init
+Counting line is set MANUALLY via set_counting_line()
+after the operator draws it with line_selector.select_line().
 """
 
 from __future__ import annotations
@@ -28,43 +20,13 @@ import numpy as np
 from .detector.person_detector import Detection, PersonDetector
 from .tracker.bytetrack_wrapper import ByteTrackWrapper, TrackedObject
 from .tracker.track_manager import Track, TrackEvent, TrackManager
+from .business_logic.entry_exit_counter import EntryExitCounter
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# PipelineResult — the single output contract
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class PipelineResult:
-    """
-    Everything produced by one call to ``Pipeline.process_frame()``.
-
-    Attributes
-    ----------
-    annotated_frame:
-        BGR NumPy array with bounding boxes, track IDs, etc. drawn on it.
-        ``None`` if annotation was skipped (e.g., ``annotate=False``).
-    detections:
-        Raw detections from the person detector (before tracking).
-    tracks:
-        Active tracks with stable IDs after ByteTrack association.
-    events:
-        Track lifecycle events emitted by TrackManager this frame.
-    business_events:
-        Higher-level events from business logic analyzers
-        (entry/exit, zone alerts, loitering flags, etc.).
-        Populated in Step 7-10 once business_logic modules are wired in.
-    frame_index:
-        Zero-based frame counter incremented each call.
-    timestamp:
-        Unix timestamp at the start of processing this frame.
-    processing_time_ms:
-        Wall-clock milliseconds spent inside ``process_frame()``.
-    """
-
     annotated_frame: Optional[np.ndarray]
     detections: List[Detection]
     tracks: List[Track]
@@ -75,26 +37,20 @@ class PipelineResult:
     processing_time_ms: float = 0.0
 
 
-# ---------------------------------------------------------------------------
-# Pipeline
-# ---------------------------------------------------------------------------
-
-
 class Pipeline:
     """
-    Orchestrates detection → tracking → (business logic) → annotation.
-
-    One instance per camera.  Not thread-safe — call from a single asyncio
-    task or Celery worker per camera.
+    Orchestrates detection → tracking → business logic → annotation.
+    One instance per camera.
 
     Usage
     -----
+    >>> from backend.ai.business_logic.line_selector import select_line, grab_preview_frame
+    >>> cap = cv2.VideoCapture("video.mp4")
+    >>> preview = grab_preview_frame(cap)
+    >>> cap.release(); cap = cv2.VideoCapture("video.mp4")   # reopen after preview!
+    >>> line_start, line_end = select_line(preview)
     >>> pipeline = Pipeline(model_path="models/yolov8n.pt")
-    >>> result = pipeline.process_frame(frame)
-    >>> cv2.imshow("SVS", result.annotated_frame)
-
-    To run without annotation (e.g., headless worker):
-    >>> result = pipeline.process_frame(frame, annotate=False)
+    >>> counter = pipeline.set_counting_line(line_start, line_end)
     """
 
     def __init__(
@@ -105,20 +61,6 @@ class Pipeline:
         max_frames_lost: int = 45,
         imgsz: int = 640,
     ) -> None:
-        """
-        Parameters
-        ----------
-        model_path:
-            Path to YOLOv8n weights file.
-        confidence_threshold:
-            Minimum YOLO confidence to accept a detection.
-        frame_rate:
-            Expected FPS of the source video — used to tune ByteTrack.
-        max_frames_lost:
-            Frames a track can be lost before being permanently removed.
-        imgsz:
-            YOLO inference image size.
-        """
         self._detector = PersonDetector(
             model_path=model_path,
             confidence_threshold=confidence_threshold,
@@ -129,49 +71,20 @@ class Pipeline:
             track_buffer=max_frames_lost,
         )
         self._track_manager = TrackManager(max_frames_lost=max_frames_lost)
-
-        # Business logic analyzers are registered here in Steps 7-10.
-        # Each analyzer must implement: analyze(tracks, events) -> List[dict]
         self._analyzers: list = []
-
-        # Frame-level annotation is lazy-imported to avoid circular imports
-        # and to keep the AI layer independent of display concerns.
-        self._annotator = None
-
+        self._counter: Optional[EntryExitCounter] = None
         self._frame_index: int = 0
+
         logger.info(
             "Pipeline initialised | model=%s | conf=%.2f | fps=%d",
-            Path(model_path).name,
-            confidence_threshold,
-            frame_rate,
+            Path(model_path).name, confidence_threshold, frame_rate,
         )
 
     # ------------------------------------------------------------------
-    # Public API
+    # Core
     # ------------------------------------------------------------------
 
-    def process_frame(
-        self,
-        frame: np.ndarray,
-        annotate: bool = True,
-    ) -> PipelineResult:
-        """
-        Run the full AI pipeline on a single frame.
-
-        Parameters
-        ----------
-        frame:
-            BGR image from OpenCV (``cap.read()``).
-        annotate:
-            If True, draw bounding boxes / IDs on a copy of the frame.
-            Set False for headless/Redis publishing to save CPU.
-
-        Returns
-        -------
-        PipelineResult
-            Always returned, even on partial failure.
-            Check ``result.detections`` / ``result.tracks`` for content.
-        """
+    def process_frame(self, frame: np.ndarray, annotate: bool = True) -> PipelineResult:
         t_start = time.perf_counter()
         self._frame_index += 1
 
@@ -181,20 +94,20 @@ class Pipeline:
         business_events: List[dict] = []
         annotated_frame: Optional[np.ndarray] = None
 
-        # ---- Stage 1: Detection ----------------------------------------
+        # Stage 1 — Detection
         try:
             detections = self._detector.detect(frame)
         except Exception as exc:
             logger.error("[Frame %d] Detection failed: %s", self._frame_index, exc, exc_info=True)
 
-        # ---- Stage 2: Tracking -----------------------------------------
+        # Stage 2 — Tracking
         try:
             h, w = frame.shape[:2]
             tracked_objects = self._tracker.update(detections, frame_shape=(h, w))
         except Exception as exc:
             logger.error("[Frame %d] Tracking failed: %s", self._frame_index, exc, exc_info=True)
 
-        # ---- Stage 3: Track manager ------------------------------------
+        # Stage 3 — Track manager
         try:
             track_events = self._track_manager.update(tracked_objects)
         except Exception as exc:
@@ -202,7 +115,7 @@ class Pipeline:
 
         active_tracks = self._track_manager.get_active_tracks()
 
-        # ---- Stage 4: Business logic analyzers (Steps 7-10) ------------
+        # Stage 4 — Business logic analyzers
         for analyzer in self._analyzers:
             try:
                 events = analyzer.analyze(active_tracks, track_events)
@@ -210,13 +123,10 @@ class Pipeline:
             except Exception as exc:
                 logger.error(
                     "[Frame %d] Analyzer %s failed: %s",
-                    self._frame_index,
-                    type(analyzer).__name__,
-                    exc,
-                    exc_info=True,
+                    self._frame_index, type(analyzer).__name__, exc, exc_info=True,
                 )
 
-        # ---- Stage 5: Annotation ----------------------------------------
+        # Stage 5 — Annotation
         if annotate:
             try:
                 annotated_frame = self._annotate(frame, active_tracks)
@@ -225,16 +135,6 @@ class Pipeline:
                 annotated_frame = frame.copy()
 
         processing_ms = (time.perf_counter() - t_start) * 1000.0
-
-        logger.debug(
-            "[Frame %d] det=%d trk=%d evt=%d biz=%d %.1f ms",
-            self._frame_index,
-            len(detections),
-            len(active_tracks),
-            len(track_events),
-            len(business_events),
-            processing_ms,
-        )
 
         return PipelineResult(
             annotated_frame=annotated_frame,
@@ -247,123 +147,130 @@ class Pipeline:
             processing_time_ms=processing_ms,
         )
 
+    # ------------------------------------------------------------------
+    # Counting line
+    # ------------------------------------------------------------------
+
+    def set_counting_line(
+        self,
+        line_start: tuple[int, int],
+        line_end: tuple[int, int],
+        in_direction: str = "auto",
+        debounce_frames: int = 10,
+    ) -> EntryExitCounter:
+        """
+        Set (or replace) the virtual counting line.
+
+        Parameters
+        ----------
+        line_start, line_end:
+            (x, y) endpoints — any angle supported.
+        in_direction:
+            "auto"  — detected from line angle automatically (recommended)
+            "down"  — downward crossing = IN
+            "up"    — upward crossing = IN
+            "right" — rightward crossing = IN
+            "left"  — leftward crossing = IN
+        debounce_frames:
+            Min frames between two counts for the same track.
+
+        Returns
+        -------
+        EntryExitCounter
+            Store reference to read count_in / count_out.
+        """
+        if in_direction == "auto":
+            in_direction = _infer_direction(line_start, line_end)
+            logger.info("Auto-inferred in_direction: %s", in_direction)
+
+        # Remove any existing counter
+        self._analyzers = [a for a in self._analyzers if not isinstance(a, EntryExitCounter)]
+
+        counter = EntryExitCounter(
+            line_start=line_start,
+            line_end=line_end,
+            in_direction=in_direction,
+            debounce_frames=debounce_frames,
+        )
+        self._analyzers.insert(0, counter)
+        self._counter = counter
+
+        logger.info(
+            "Counting line set | start=%s end=%s direction=%s",
+            line_start, line_end, in_direction,
+        )
+        return counter
+
+    def get_counter(self) -> Optional[EntryExitCounter]:
+        """Return the active EntryExitCounter, or None if not set."""
+        return self._counter
+
+    # ------------------------------------------------------------------
+    # Analyzers
+    # ------------------------------------------------------------------
+
     def register_analyzer(self, analyzer) -> None:
-        """
-        Register a business-logic analyzer with the pipeline.
-
-        The analyzer must implement:
-            analyze(tracks: List[Track], events: List[TrackEvent]) -> List[dict]
-
-        Called in Steps 7-10 when entry_exit_counter, zone_monitor,
-        behavior_analyzer, and heatmap_generator are added.
-        """
+        """Register a business-logic analyzer."""
         self._analyzers.append(analyzer)
         logger.info("Registered analyzer: %s", type(analyzer).__name__)
 
     def reset(self) -> None:
-        """Reset tracker and track manager state (e.g., on camera reconnect)."""
+        """Reset tracker and track manager state."""
         self._tracker.reset()
         self._track_manager.reset()
         self._frame_index = 0
         logger.info("Pipeline state reset.")
 
     # ------------------------------------------------------------------
-    # Private helpers
+    # Private
     # ------------------------------------------------------------------
 
     def _annotate(self, frame: np.ndarray, tracks: List[Track]) -> np.ndarray:
-        """
-        Draw bounding boxes and track IDs on a copy of *frame*.
-
-        A full-featured annotator lives in frame_annotator.py (Step 11).
-        This minimal inline version keeps the pipeline self-contained for
-        the smoke test in Steps 1-6.
-        """
-        import cv2  # local import — not available in all server contexts
-
+        import cv2
         canvas = frame.copy()
         for track in tracks:
             x1, y1, x2, y2 = track.bbox
             color = self._id_to_color(track.track_id)
             cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
-            label = f"ID:{track.track_id}  {track.confidence:.2f}"
             cv2.putText(
-                canvas,
-                label,
+                canvas, f"ID:{track.track_id}  {track.confidence:.2f}",
                 (x1, max(y1 - 8, 12)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                color,
-                2,
-                cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA,
             )
         return canvas
 
     @staticmethod
     def _id_to_color(track_id: int) -> tuple[int, int, int]:
-        """Map track ID to a deterministic BGR colour."""
         palette = [
-            (255, 56, 56), (255, 157, 151), (255, 112, 31), (255, 178, 29),
-            (207, 210, 49), (72, 249, 10), (146, 204, 23), (61, 219, 134),
-            (26, 147, 52), (0, 212, 187), (44, 153, 168), (0, 194, 255),
-            (52, 69, 147), (100, 115, 255), (0, 24, 236), (132, 56, 255),
-            (82, 0, 133), (203, 56, 255), (255, 149, 200), (255, 55, 199),
+            (255, 56, 56),   (255, 157, 151), (255, 112, 31),  (255, 178, 29),
+            (207, 210, 49),  (72, 249, 10),   (146, 204, 23),  (61, 219, 134),
+            (26, 147, 52),   (0, 212, 187),   (44, 153, 168),  (0, 194, 255),
+            (52, 69, 147),   (100, 115, 255), (0, 24, 236),    (132, 56, 255),
+            (82, 0, 133),    (203, 56, 255),  (255, 149, 200), (255, 55, 199),
         ]
         return palette[track_id % len(palette)]
 
 
 # ---------------------------------------------------------------------------
-# CLI smoke-test entry point (Step 6 golden-rule validation)
+# Helper — infer IN direction from line angle
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
-    import sys
-    import cv2
+def _infer_direction(start: tuple[int, int], end: tuple[int, int]) -> str:
+    """
+    Infer the natural IN direction from the line angle.
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-    )
+    For a mostly-horizontal line → people crossing downward = IN.
+    For a mostly-vertical line   → people crossing rightward = IN.
+    For diagonal lines           → based on dominant axis.
+    """
+    import math
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    angle = abs(math.degrees(math.atan2(dy, dx)))
 
-    video_source = sys.argv[1] if len(sys.argv) > 1 else 0
-    model_path = sys.argv[2] if len(sys.argv) > 2 else "models/yolov8n.pt"
-
-    pipeline = Pipeline(model_path=model_path)
-
-    cap = cv2.VideoCapture(video_source)
-    if not cap.isOpened():
-        logger.error("Cannot open video source: %s", video_source)
-        sys.exit(1)
-
-    logger.info("Starting smoke test. Press 'q' to quit.")
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            logger.info("End of stream reached.")
-            break
-
-        result = pipeline.process_frame(frame, annotate=True)
-
-        # Overlay frame index and processing time
-        cv2.putText(
-            result.annotated_frame,
-            f"Frame:{result.frame_index}  {result.processing_time_ms:.1f}ms  "
-            f"det:{len(result.detections)}  trk:{len(result.tracks)}",
-            (10, 28),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (0, 255, 0),
-            2,
-            cv2.LINE_AA,
-        )
-
-        cv2.imshow("SVS — AI Pipeline Smoke Test", result.annotated_frame)
-
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            logger.info("User quit.")
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-    logger.info("Smoke test complete.")
+    # Horizontal-ish line (angle < 45°)
+    if angle < 45 or angle > 135:
+        return "down"
+    # Vertical-ish line
+    else:
+        return "right"

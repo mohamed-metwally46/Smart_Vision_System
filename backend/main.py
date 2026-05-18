@@ -3,18 +3,21 @@ main.py
 ───────
 FastAPI application factory for the Smart Vision System backend.
 
-Mounts:
-  - REST API router   → /api/v1  (all resources via api/router.py)
-  - WebSocket routes  → /ws/cameras/{camera_id}  and  /ws/alerts
-  - Lifespan hooks    → startup / shutdown (DB, Redis pool, WS manager)
+Responsibilities
+────────────────
+  - Create the FastAPI app
+  - Register middleware (CORS)
+  - Mount REST router  → /api/v1  (via api/router.py)
+  - Register WebSocket endpoints  (delegate logic to websocket/handlers.py)
+  - Manage application lifespan (startup / shutdown order)
 
 Import contract
 ───────────────
-  Shared resources  ← backend.app.dependencies   (get_db, get_redis, …)
-  All REST routes   ← backend.app.api.router      (api_router)
-  WebSocket manager ← backend.app.websocket.manager
+  All REST routes     ← backend.app.api.router       (api_router)
+  Shared resources    ← backend.app.dependencies      (get_ws_manager, close_redis)
+  WS lifecycle logic  ← backend.app.websocket.handlers
 
-STRICT: No AI logic here. No business logic. Pure orchestration.
+STRICT: No AI logic. No Redis logic. No serialization. Pure wiring.
 """
 
 from __future__ import annotations
@@ -22,12 +25,14 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api.router import api_router
 from backend.app.config import settings
-from backend.app.dependencies import close_redis, get_ws_manager
+from backend.app.core.redis import close_redis
+from backend.app.dependencies import get_ws_manager
+from backend.app.websocket.handlers import handle_camera_stream, handle_alerts_stream
 from backend.app.websocket.manager import ConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -43,38 +48,36 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Application startup → yield → shutdown.
+    Startup → yield → shutdown.
 
-    Startup order:
-      1. DB     — tables must exist before workers write events
-      2. Redis  — pool lazily created; we track it for clean shutdown
-      3. WS manager — subscribes to Redis, must come after Redis is up
+    Order matters:
+      1. DB     — tables must exist before any worker writes events
+      2. WS manager startup  — logs readiness (Redis pool is lazy)
+    Shutdown (reverse):
+      1. WS manager shutdown  — cancel listeners, close WebSockets
+      2. Redis pool close     — flush remaining commands
+      3. DB engine dispose    — return pooled connections
     """
     logger.info("SVS Backend starting up…")
 
-    # 1. Database
     from backend.app.db.session import init_db
     await init_db()
 
-    # 2. WebSocket manager (opens Redis pub/sub connection)
     ws_manager = get_ws_manager()
     await ws_manager.startup()
 
     logger.info(
         "SVS Backend ready — docs at http://%s:%d/docs",
-        settings.HOST,
-        settings.PORT,
+        settings.HOST, settings.PORT,
     )
     yield
 
-    # ── Shutdown (reverse order) ──────────────────────────────────────────────
     logger.info("SVS Backend shutting down…")
-
-    await ws_manager.shutdown()   # closes WebSocket connections + pub/sub
-    await close_redis()           # closes shared aioredis pool from dependencies.py
+    await ws_manager.shutdown()
+    await close_redis()
 
     from backend.app.db.session import close_db
-    await close_db()              # disposes SQLAlchemy async engine
+    await close_db()
 
     logger.info("SVS Backend stopped cleanly.")
 
@@ -104,38 +107,17 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # ── REST: single include — all routes live in api/router.py ──────────────
+    # ── REST API ──────────────────────────────────────────────────────────────
     app.include_router(api_router, prefix="/api/v1")
 
-    # ── WebSocket: per-camera live frame stream ───────────────────────────────
+    # ── WebSocket: live camera frame stream ───────────────────────────────────
     @app.websocket("/ws/cameras/{camera_id}")
     async def camera_stream_ws(
         websocket: WebSocket,
         camera_id: int,
         manager: ConnectionManager = Depends(get_ws_manager),
     ):
-        """
-        Live annotated frame stream for one camera.
-
-        Message schema — api-reference.md §8.1:
-        {
-            "camera_id": int,
-            "timestamp": "ISO-8601",
-            "frame":     "base64-jpeg",
-            "occupancy": int,
-            "tracks":    [{"track_id": int, "bbox": [x, y, w, h]}]
-        }
-        """
-        await manager.connect(websocket, camera_id)
-        try:
-            while True:
-                await websocket.receive_text()  # blocks; detects client disconnect
-        except WebSocketDisconnect:
-            pass
-        except Exception as exc:
-            logger.debug("[WS /cameras/%s] %s", camera_id, exc)
-        finally:
-            await manager.disconnect(websocket, camera_id)
+        await handle_camera_stream(websocket, camera_id, manager)
 
     # ── WebSocket: global alert stream ────────────────────────────────────────
     @app.websocket("/ws/alerts")
@@ -143,29 +125,7 @@ def create_app() -> FastAPI:
         websocket: WebSocket,
         manager: ConnectionManager = Depends(get_ws_manager),
     ):
-        """
-        Live alert stream from ALL cameras.
-
-        Message schema — api-reference.md §8.2:
-        {
-            "camera_id": int,
-            "type":      "zone_overcrowding" | "loitering" | "crossing_event",
-            "severity":  "high" | "medium" | "low",
-            "message":   str,
-            "timestamp": "ISO-8601",
-            "metadata":  { … }
-        }
-        """
-        await manager.connect(websocket, "alerts")
-        try:
-            while True:
-                await websocket.receive_text()
-        except WebSocketDisconnect:
-            pass
-        except Exception as exc:
-            logger.debug("[WS /alerts] %s", exc)
-        finally:
-            await manager.disconnect(websocket, "alerts")
+        await handle_alerts_stream(websocket, manager)
 
     # ── Root ──────────────────────────────────────────────────────────────────
     @app.get("/", include_in_schema=False)
@@ -178,5 +138,4 @@ def create_app() -> FastAPI:
 # ── ASGI entry-point ──────────────────────────────────────────────────────────
 app = create_app()
 
-# Run locally:
-#   uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+# uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
