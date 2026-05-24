@@ -1,62 +1,138 @@
 """
 core/security.py
-────────────────
-Authentication and authorisation for the Smart Vision System.
-
-Future implementation — Phase 4 (auth sprint)
-──────────────────────────────────────────────
-Authentication is NOT enabled in Phase 1 or 2 (api-reference.md §2).
-This file contains placeholder interfaces that will be filled in Phase 4.
-
-Planned implementation:
-  - JWT access tokens (HS256, configurable secret + expiry)
-  - Role-based access control: admin / operator / viewer
-  - FastAPI security dependencies (OAuth2PasswordBearer)
-  - Password hashing via passlib[bcrypt]
-
-Planned public API
-──────────────────
-  create_access_token(data, expires_delta) → str
-  decode_access_token(token) → dict
-  get_current_user(token)    → UserOut  (FastAPI dependency)
-  require_role(role)         → Callable  (FastAPI dependency factory)
-  hash_password(plain)       → str
-  verify_password(plain, hashed) → bool
-
-Configuration (future, add to config.py):
-  JWT_SECRET_KEY   — strong random string
-  JWT_ALGORITHM    — "HS256"
-  ACCESS_TOKEN_EXPIRE_MINUTES — default 60
-
-Usage (future — not yet active):
-    from backend.app.core.security import get_current_user
-    @router.get("/protected")
-    async def protected(user = Depends(get_current_user)):
-        ...
+JWT creation, validation, and password hashing.
+All secrets read from environment via config.py — never hardcoded.
 """
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-from __future__ import annotations
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from fastapi import Depends, HTTPException, status, WebSocket
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.config import settings
+from backend.app.dependencies import get_db
+from backend.app.schemas.auth import TokenData
 
-class AuthNotImplementedError(NotImplementedError):
-    """Raised when auth helpers are called before Phase 4 implementation."""
-
-
-def create_access_token(data: dict, expires_delta=None) -> str:
-    raise AuthNotImplementedError("JWT auth not yet implemented.")
-
-
-def decode_access_token(token: str) -> dict:
-    raise AuthNotImplementedError("JWT auth not yet implemented.")
+# ---------------------------------------------------------------------------
+# Password hashing
+# ---------------------------------------------------------------------------
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def hash_password(plain: str) -> str:
-    raise AuthNotImplementedError("JWT auth not yet implemented.")
+    return pwd_context.hash(plain)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    raise AuthNotImplementedError("JWT auth not yet implemented.")
+    return pwd_context.verify(plain, hashed)
 
 
-async def get_current_user(token: str):
-    raise AuthNotImplementedError("JWT auth not yet implemented.")
+# ---------------------------------------------------------------------------
+# JWT
+# ---------------------------------------------------------------------------
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
+
+_ALGORITHM = settings.JWT_ALGORITHM
+_SECRET = settings.JWT_SECRET_KEY
+_EXPIRE_HOURS = settings.JWT_EXPIRE_HOURS
+
+
+def create_access_token(user_id: int, username: str, is_superuser: bool = False) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(hours=_EXPIRE_HOURS)
+    payload = {
+        "sub": username,
+        "user_id": user_id,
+        "is_superuser": is_superuser,
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
+    }
+    return jwt.encode(payload, _SECRET, algorithm=_ALGORITHM)
+
+
+def decode_token(token: str) -> TokenData:
+    """Decode and validate a JWT. Raises HTTPException on failure."""
+    credentials_exc = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, _SECRET, algorithms=[_ALGORITHM])
+        username: Optional[str] = payload.get("sub")
+        user_id: Optional[int] = payload.get("user_id")
+        if username is None or user_id is None:
+            raise credentials_exc
+        return TokenData(
+            sub=username,
+            user_id=user_id,
+            is_superuser=payload.get("is_superuser", False),
+        )
+    except JWTError:
+        raise credentials_exc
+
+
+# ---------------------------------------------------------------------------
+# FastAPI dependencies
+# ---------------------------------------------------------------------------
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db),
+):
+    """Dependency: validate JWT and return the active User ORM object."""
+    from backend.app.models.user import User
+    from sqlalchemy import select
+
+    token_data = decode_token(token)
+
+    result = await db.execute(select(User).where(User.id == token_data.user_id))
+    user = result.scalar_one_or_none()
+
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+
+async def get_current_superuser(current_user=Depends(get_current_user)):
+    """Dependency: require superuser role."""
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superuser privileges required",
+        )
+    return current_user
+
+
+async def ws_get_current_user(websocket: WebSocket, db: AsyncSession = Depends(get_db)):
+    """
+    WebSocket auth: read token from query param `?token=<jwt>`.
+    Close with 4001 if invalid.
+    """
+    from backend.app.models.user import User
+    from sqlalchemy import select
+
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=4001)
+        return None
+
+    try:
+        token_data = decode_token(token)
+    except HTTPException:
+        await websocket.close(code=4001)
+        return None
+
+    result = await db.execute(select(User).where(User.id == token_data.user_id))
+    user = result.scalar_one_or_none()
+    if user is None or not user.is_active:
+        await websocket.close(code=4001)
+        return None
+
+    return user

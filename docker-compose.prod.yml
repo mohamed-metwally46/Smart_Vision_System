@@ -59,7 +59,7 @@ services:
     command: >
       uvicorn backend.app.main:app
       --host 0.0.0.0
-      --port 8000
+      --port 3000
       --workers 4
 
   celery_cameras:

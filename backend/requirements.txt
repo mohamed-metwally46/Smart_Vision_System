@@ -29,6 +29,10 @@ numpy==1.26.*
 pydantic==2.7.*
 pydantic-settings==2.3.*
 
+# ── Authentication ─────────────────────────────────────────────────────────────
+python-jose[cryptography]==3.3.*   # JWT encoding / decoding
+passlib[bcrypt]==1.7.*             # password hashing (bcrypt)
+
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv==1.0.*
 httpx==0.27.*               # async HTTP client (used in tests + health probes)

@@ -36,7 +36,7 @@ COPY . .
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')" || true
 
 # ── Port ───────────────────────────────────────────────────────────────────────
-EXPOSE 8000
+EXPOSE 3000
 
 # ── Default command (overridden by docker-compose for dev --reload) ────────────
-CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "3000"]

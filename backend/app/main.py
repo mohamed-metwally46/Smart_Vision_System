@@ -47,8 +47,9 @@ async def lifespan(app: FastAPI):
 
     Startup order:
       1. DB     — tables must exist before workers write events
-      2. Redis  — pool lazily created; we track it for clean shutdown
-      3. WS manager — subscribes to Redis, must come after Redis is up
+      2. Seed   — create first superuser if users table is empty
+      3. Redis  — pool lazily created; we track it for clean shutdown
+      4. WS manager — subscribes to Redis, must come after Redis is up
     """
     logger.info("SVS Backend starting up…")
 
@@ -56,7 +57,13 @@ async def lifespan(app: FastAPI):
     from backend.app.db.session import init_db
     await init_db()
 
-    # 2. WebSocket manager (opens Redis pub/sub connection)
+    # 2. Seed first superuser
+    from backend.app.db.session import AsyncSessionLocal
+    from backend.app.db.seed import seed_superuser
+    async with AsyncSessionLocal() as db:
+        await seed_superuser(db)
+
+    # 3. WebSocket manager (opens Redis pub/sub connection)
     ws_manager = get_ws_manager()
     await ws_manager.startup()
 
@@ -86,7 +93,7 @@ def create_app() -> FastAPI:
         title="Smart Vision System API",
         description=(
             "Real-time AI surveillance and analytics backend.\n\n"
-            "- **REST** `/api/v1/` — cameras, alerts, analytics, logs, health\n"
+            "- **REST** `/api/v1/` — cameras, alerts, analytics, logs, health, auth, zones\n"
             "- **WebSocket** `/ws/` — live annotated frames and alert stream"
         ),
         version="1.0.0",
@@ -125,7 +132,18 @@ def create_app() -> FastAPI:
             "occupancy": int,
             "tracks":    [{"track_id": int, "bbox": [x, y, w, h]}]
         }
+
+        Auth: pass JWT as query param → /ws/cameras/1?token=<jwt>
         """
+        from backend.app.core.security import ws_get_current_user
+        from backend.app.dependencies import get_db
+        from backend.app.db.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            user = await ws_get_current_user(websocket, db)
+        if user is None:
+            return  # ws_get_current_user already closed the socket with 4001
+
         await manager.connect(websocket, camera_id)
         try:
             while True:
@@ -155,7 +173,17 @@ def create_app() -> FastAPI:
             "timestamp": "ISO-8601",
             "metadata":  { … }
         }
+
+        Auth: pass JWT as query param → /ws/alerts?token=<jwt>
         """
+        from backend.app.core.security import ws_get_current_user
+        from backend.app.db.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            user = await ws_get_current_user(websocket, db)
+        if user is None:
+            return
+
         await manager.connect(websocket, "alerts")
         try:
             while True:
