@@ -137,11 +137,11 @@ function LoginForm() {
             {isSubmitting ? "Signing in…" : "Sign In"}
           </button>
         </form>
-
+{/* 
         <p className="mt-4 text-center text-xs text-surface-500">
           First-time default: <span className="font-mono text-surface-400">admin</span> /{" "}
           <span className="font-mono text-surface-400">changeme</span>
-        </p>
+        </p> */}
 
         <p className="mt-4 text-center text-xs text-surface-500">
           Smart Vision System · Graduation Project
