@@ -1,7 +1,7 @@
 """
 bytetrack_wrapper.py
 --------------------
-Wraps the ByteTrack multi-object tracker.
+Wraps the ByteTrack multi-object tracker via the `supervision` library.
 
 Design constraints (from handoff):
   - Input  : List[Detection]  (from person_detector)
@@ -10,7 +10,7 @@ Design constraints (from handoff):
   - No FastAPI imports
 
 Install dependency:
-    pip install lapx byte-tracker
+    pip install supervision
 """
 
 from __future__ import annotations
@@ -49,29 +49,9 @@ class TrackedObject:
     is_confirmed: bool = True
 
 
-class _ByteTrackArgs:
-    """
-    Minimal argument object expected by BYTETracker.
-    Mirrors the argparse namespace used in the original ByteTrack repo.
-    """
-
-    def __init__(
-        self,
-        track_thresh: float = 0.5,
-        track_buffer: int = 60,
-        match_thresh: float = 0.8,
-        frame_rate: int = 30,
-    ) -> None:
-        self.track_thresh = track_thresh
-        self.track_buffer = track_buffer
-        self.match_thresh = match_thresh
-        self.mot20 = False
-        self.frame_rate = frame_rate
-
-
 class ByteTrackWrapper:
     """
-    Stateful wrapper around BYTETracker.
+    Stateful wrapper around supervision's ByteTracker.
 
     One instance per camera — do not share across cameras because
     ByteTrack's internal Kalman filters hold per-camera state.
@@ -104,23 +84,31 @@ class ByteTrackWrapper:
             IoU threshold for track-detection matching.
         """
         try:
-            from byte_tracker import BYTETracker  # type: ignore[import]
+            import supervision as sv  # type: ignore[import]
         except ImportError as exc:
             raise ImportError(
-                "ByteTrack is not installed. Run:  pip install lapx byte-tracker"
+                "supervision is not installed. Run:  pip install supervision"
             ) from exc
 
-        args = _ByteTrackArgs(
-            track_thresh=track_thresh,
-            track_buffer=track_buffer,
-            match_thresh=match_thresh,
+        self._sv = sv
+        self._track_thresh = track_thresh
+        self._track_buffer = track_buffer
+        self._match_thresh = match_thresh
+        self._frame_rate = frame_rate
+
+        self._tracker = sv.ByteTrack(
+            lost_track_buffer=track_buffer,
+            minimum_matching_threshold=match_thresh,
             frame_rate=frame_rate,
+            minimum_consecutive_frames=1,
         )
-        self._tracker = BYTETracker(args, frame_rate=frame_rate)
+
         logger.info(
-            "ByteTrackWrapper initialised | frame_rate=%d | track_buffer=%d",
+            "ByteTrackWrapper initialised (supervision) | "
+            "frame_rate=%d | track_buffer=%d | match_thresh=%.2f",
             frame_rate,
             track_buffer,
+            match_thresh,
         )
 
     # ------------------------------------------------------------------
@@ -140,74 +128,92 @@ class ByteTrackWrapper:
         detections:
             Output of ``PersonDetector.detect()`` for the current frame.
         frame_shape:
-            ``(height, width)`` of the source frame — used by ByteTrack
-            to clip predicted boxes to valid image bounds.
+            ``(height, width)`` of the source frame.
 
         Returns
         -------
         List[TrackedObject]
-            All currently active (confirmed + tentative) tracks.
+            All currently active tracks with stable IDs.
         """
+        sv = self._sv
+
         if not detections:
-            # Advance tracker with empty detections so Kalman filters update
+            # Advance Kalman filters with an empty detection set
+            empty = sv.Detections(
+                xyxy=np.empty((0, 4), dtype=np.float32),
+                confidence=np.empty(0, dtype=np.float32),
+                class_id=np.empty(0, dtype=int),
+            )
             try:
-                self._tracker.update(
-                    np.empty((0, 5), dtype=np.float32),
-                    frame_shape,
-                    frame_shape,
-                )
+                self._tracker.update_with_detections(empty)
             except Exception:
                 pass
             return []
 
-        det_array = self._detections_to_array(detections)
+        sv_dets = self._detections_to_sv(detections)
 
         try:
-            stracks = self._tracker.update(
-                det_array,
-                frame_shape,
-                frame_shape,
-            )
+            tracked = self._tracker.update_with_detections(sv_dets)
         except Exception as exc:
             logger.error("ByteTrack update failed: %s", exc, exc_info=True)
             return []
 
-        return self._stracks_to_tracked_objects(stracks)
+        return self._sv_to_tracked_objects(tracked)
 
     def reset(self) -> None:
-        """Reset tracker state (call between disconnected video segments)."""
-        self._tracker.reset()
+        """
+        Reset tracker state (call between disconnected video segments).
+        supervision's ByteTracker has no reset() method so we re-instantiate.
+        """
+        sv = self._sv
+        self._tracker = sv.ByteTrack(
+            lost_track_buffer=self._track_buffer,
+            minimum_matching_threshold=self._match_thresh,
+            frame_rate=self._frame_rate,
+            minimum_consecutive_frames=1,
+        )
         logger.debug("ByteTrackWrapper state reset.")
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _detections_to_array(detections: List[Detection]) -> np.ndarray:
-        """
-        Convert Detection list → NumPy array shaped ``(N, 5)``.
-        Columns: ``[x1, y1, x2, y2, confidence]``
-        """
-        rows = []
-        for det in detections:
-            x1, y1, x2, y2 = det.bbox
-            rows.append([x1, y1, x2, y2, det.confidence])
-        return np.array(rows, dtype=np.float32)
+    def _detections_to_sv(self, detections: List[Detection]):
+        """Convert Detection list → supervision Detections object."""
+        sv = self._sv
+        xyxy = np.array(
+            [list(d.bbox) for d in detections], dtype=np.float32
+        )  # shape (N, 4)
+        confidence = np.array(
+            [d.confidence for d in detections], dtype=np.float32
+        )
+        class_id = np.zeros(len(detections), dtype=int)  # all person (class 0)
+
+        return sv.Detections(xyxy=xyxy, confidence=confidence, class_id=class_id)
 
     @staticmethod
-    def _stracks_to_tracked_objects(stracks) -> List[TrackedObject]:
-        """Convert STrack objects → TrackedObject dataclasses."""
+    def _sv_to_tracked_objects(tracked) -> List[TrackedObject]:
+        """Convert supervision Detections (with tracker_id) → TrackedObject list."""
         result: List[TrackedObject] = []
-        for strack in stracks:
-            tlbr = strack.tlbr  # top-left bottom-right
-            x1, y1, x2, y2 = int(tlbr[0]), int(tlbr[1]), int(tlbr[2]), int(tlbr[3])
+
+        if tracked.tracker_id is None or len(tracked.tracker_id) == 0:
+            return result
+
+        for i in range(len(tracked.xyxy)):
+            tid = tracked.tracker_id[i]
+            if tid is None:
+                continue
+
+            x1, y1, x2, y2 = (int(v) for v in tracked.xyxy[i])
+            conf = float(tracked.confidence[i]) if tracked.confidence is not None else 1.0
+
             result.append(
                 TrackedObject(
-                    track_id=int(strack.track_id),
+                    track_id=int(tid),
                     bbox=(x1, y1, x2, y2),
-                    confidence=float(strack.score),
-                    is_confirmed=strack.is_activated,
+                    confidence=conf,
+                    is_confirmed=True,
                 )
             )
+
         return result

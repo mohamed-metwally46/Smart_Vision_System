@@ -1,20 +1,10 @@
 # Architecture Overview
 
-This document describes the high-level system architecture of the **Smart Vision System**, including all major layers, data flow between components, and the responsibilities of each service.
-
-The architecture is designed to provide:
-
-* Real-time AI video analytics
-* Live event streaming
-* Modular service separation
-* Scalable multi-camera support
-* Future cloud deployment readiness
+This document describes the system architecture of the **Smart Vision System**.
 
 ---
 
 # 1. System Architecture Layers
-
-The system is divided into five major layers:
 
 1. **Camera Input Layer**
 2. **AI Processing Layer**
@@ -22,24 +12,21 @@ The system is divided into five major layers:
 4. **Frontend Dashboard Layer**
 5. **Infrastructure Layer**
 
-These layers work together to transform live camera streams into actionable analytics and alerts.
-
 ---
 
 # 2. High-Level Data Flow
 
-The main real-time processing flow is:
-
-```bash id="g4n7hu"
+**Real-Time Streaming Flow:**
+```
 Camera Stream
     ↓
-Frame Capture Worker
+Frame Capture Worker (camera_worker.py)
     ↓
-AI Detection Layer
-    ↓
-Tracking Layer
-    ↓
-Business Logic Layer
+AI Pipeline (pipeline.py)
+    ├── Detection (YOLOv8n)
+    ├── Tracking (ByteTrack via supervision)
+    ├── Business Logic (counter, zones, loitering, heatmap, alerts)
+    └── Frame Annotation
     ↓
 Redis Pub/Sub
     ↓
@@ -48,196 +35,90 @@ Backend WebSocket Manager
 Frontend Dashboard
 ```
 
-At the same time, events are stored in the database:
-
-```bash id="1cz6x5"
+**Persistent Analytics Flow:**
+```
 Business Logic Events
-        ↓
-PostgreSQL Database
-        ↓
+    ↓
+AlertEngine → PostgreSQL
+    ↓
 REST APIs
-        ↓
+    ↓
 Frontend Analytics Pages
 ```
-
-This creates two simultaneous flows:
-
-1. **Real-Time Streaming Flow**
-2. **Persistent Analytics Flow**
 
 ---
 
 # 3. Camera Input Layer
 
-The Camera Input Layer is responsible for acquiring frames from:
+Acquires frames from: USB cameras, RTSP streams, recorded video files.
 
-* USB cameras
-* RTSP streams
-* Recorded video files
+**Operator Setup (Phase 1):**
+Before processing starts, the operator uses `line_selector.py` to draw
+the virtual counting line on a preview frame. The line is stored in the
+Pipeline instance for the session.
 
-Each camera source is handled by a dedicated worker process.
-
-## Responsibilities
-
-* Open video stream
-* Read frames continuously
-* Handle reconnection on failure
-* Send frames to the AI pipeline
-
-## Main Component
-
-```bash id="p9s6wf"
-backend/app/workers/camera_worker.py
+```
+grab_preview_frame(cap) → select_line(frame) → pipeline.set_counting_line(start, end)
 ```
 
-This worker isolates each camera so that one failing stream does not interrupt the others.
+Main component: `backend/app/workers/camera_worker.py`
 
 ---
 
 # 4. AI Processing Layer
 
-The AI Processing Layer transforms raw frames into structured detections and business events.
-
-It consists of four sublayers:
-
-1. Detection
-2. Tracking
-3. Business Logic
-4. Frame Annotation
-
----
-
 ## 4.1 Detection Layer
+- Phase 1: Person detection via YOLOv8n
+- Phase 2: Weapon detection via fine-tuned YOLO
 
-This layer detects objects of interest from each frame.
+Input: Raw BGR frame → Output: `List[Detection]` (bbox + confidence)
 
-### Phase 1
-
-* Person detection using YOLOv8n
-
-### Phase 2
-
-* Weapon detection using a fine-tuned YOLO model
-
-## Input
-
-```bash id="1wqkho"
-Raw Frame
-```
-
-## Output
-
-```bash id="3shl1d"
-Bounding Boxes + Confidence Scores
-```
-
-## Main Components
-
-```bash id="3npx7y"
-backend/ai/detector/model_loader.py
-backend/ai/detector/person_detector.py
-```
-
----
+Components:
+- `backend/ai/detector/model_loader.py` — CUDA/CPU device selection, model caching
+- `backend/ai/detector/person_detector.py` — YOLOv8 inference wrapper
 
 ## 4.2 Tracking Layer
+ByteTrack via `supervision` library assigns stable IDs across frames.
 
-This layer assigns persistent IDs to detected persons using ByteTrack.
+Input: `List[Detection]` → Output: `List[TrackedObject]` (track_id + bbox)
 
-## Responsibilities
-
-* Maintain object identity across frames
-* Track movement
-* Handle lost and recovered tracks
-
-## Input
-
-```bash id="6zc2kr"
-Detections
-```
-
-## Output
-
-```bash id="ikz67g"
-Tracked Objects with IDs
-```
-
-## Main Components
-
-```bash id="jjw1iy"
-backend/ai/tracker/bytetrack_wrapper.py
-backend/ai/tracker/track_manager.py
-```
-
----
+Components:
+- `backend/ai/tracker/bytetrack_wrapper.py` — supervision ByteTrack wrapper
+- `backend/ai/tracker/track_manager.py` — ACTIVE/LOST/REMOVED state machine, velocity
 
 ## 4.3 Business Logic Layer
+Converts tracked movement into business events.
 
-This layer converts tracked movement into business events.
-
-## Core Features
-
-* Entry/Exit counting
-* Zone occupancy monitoring
-* Loitering detection
-* Heatmap accumulation
-* Alert generation
-
-## Example Events
-
-* Person entered
-* Zone overcrowded
-* Suspicious loitering detected
-
-## Main Components
-
-```bash id="kr7vzt"
-backend/ai/business_logic/
-```
-
----
+| Module | Function |
+|---|---|
+| `entry_exit_counter.py` | Virtual line crossing (any angle) with signed-distance math |
+| `zone_monitor.py` | Polygon zone occupancy via `cv2.pointPolygonTest` |
+| `behavior_analyzer.py` | Loitering detection via centroid displacement |
+| `heatmap_generator.py` | Float32 density grid + Gaussian blur PNG export |
+| `alert_engine.py` | Severity rules, cooldown deduplication, structured AlertEvents |
+| `line_selector.py` | Interactive mouse line selector (operator tool, any angle) |
 
 ## 4.4 Frame Annotation Layer
-
-This layer overlays analytics data on frames.
-
-## Draws
-
-* Bounding boxes
-* Track IDs
-* Counters
-* Zones
-* Alerts
-
-## Main Component
-
-```bash id="1msm3u"
-backend/ai/frame_annotator.py
-```
-
----
+`backend/ai/frame_annotator.py` draws:
+- Bounding boxes (colour per track ID)
+- Track IDs + confidence
+- Zone polygons with occupancy labels
+- Entry/exit virtual line with counters
+- Loitering red-border indicator
+- FPS / processing time overlay
 
 ## 4.5 AI Pipeline Orchestrator
+`backend/ai/pipeline.py` — single public entry point:
 
-This is the main integration point of the AI layer.
-
-## Pipeline Flow
-
-```bash id="qnt1f9"
-Frame
- → Detection
- → Tracking
- → Business Logic
- → Annotation
+```python
+result = pipeline.process_frame(frame)
+# result.detections, result.tracks, result.business_events
 ```
 
-## Main Component
-
-```bash id="uq0wtk"
-backend/ai/pipeline.py
-```
-
-This ensures all AI components remain modular while producing a unified output.
+Key methods:
+- `set_counting_line(start, end, in_direction="auto")` — manual line setup
+- `register_analyzer(analyzer)` — plug in any business logic module
+- `get_counter()` — access entry/exit counts
 
 ---
 
@@ -279,335 +160,98 @@ models/train_pipeline.py
 
 # 6. Backend Service Layer
 
-The Backend Layer coordinates:
-
-* AI workers
-* API access
-* WebSocket streaming
-* event storage
-
-It is implemented using **FastAPI**.
-
----
-
 ## 5.1 REST API Layer
-
-Provides endpoints for:
-
-* camera management
-* alert history
-* analytics
-* logs
-
-## Main Router Path
-
-```bash id="jlwmgn"
-backend/app/api/v1/
-```
-
-These APIs provide historical analytics data to the frontend dashboard.
-
----
+`backend/app/api/v1/` — historical data endpoints:
+- cameras, alerts, analytics, logs, health
 
 ## 5.2 WebSocket Streaming Layer
-
-The WebSocket layer streams live frames and alerts to the frontend.
-
-## Responsibilities
-
-* manage dashboard connections
-* broadcast annotated frames
-* push live alerts
-
-## Main Components
-
-```bash id="cxxt6z"
-backend/app/websocket/manager.py
-backend/app/websocket/handlers.py
-```
-
-This enables real-time updates without page refresh.
-
----
+`backend/app/websocket/` — real-time push to dashboard:
+- annotated frames (base64 JPEG)
+- live alert notifications
 
 ## 5.3 Event Logging Layer
-
-Business events are stored in PostgreSQL.
-
-## Logged Events
-
-* entry/exit events
-* alerts
-* zone violations
-* occupancy snapshots
-
-## Main Components
-
-```bash id="3z6m91"
-backend/app/models/
-backend/app/db/
-```
-
-This supports historical analysis and reporting.
-
----
+PostgreSQL via SQLAlchemy async:
+- entry/exit events, alerts, zone violations, occupancy snapshots
 
 ## 5.4 Redis Messaging Layer
-
-Redis acts as an internal messaging bus.
-
-## Responsibilities
-
-* publish AI results
-* deliver frames to WebSocket manager
-* decouple workers from APIs
-
-## Flow
-
-```bash id="xllng4"
-AI Worker → Redis Channel → WebSocket Manager
+Decouples AI workers from WebSocket delivery:
 ```
-
-This architecture prevents the AI pipeline from depending directly on WebSocket clients.
-
----
-
-# 6. Frontend Dashboard Layer
-
-The frontend is built using **Next.js** and provides the monitoring interface.
-
----
-
-## 6.1 Live Monitoring
-
-Displays:
-
-* live camera feeds
-* track IDs
-* overlays
-* live counters
-
-## Main Components
-
-```bash id="bpl3ye"
-frontend/components/monitor/
+AI Worker → Redis Channel → WebSocket Manager → Dashboard
 ```
 
 ---
 
-## 6.2 Alerts Dashboard
+# 6. Frontend Dashboard Layer (Next.js)
 
-Displays:
+| Page | Content |
+|---|---|
+| `/monitor` | Live camera feeds, track IDs, overlays, counters |
+| `/alerts` | Active alerts, history, severity indicators |
+| `/analytics` | Occupancy charts, heatmaps, entry/exit reports |
+| `/logs` | Historical event logs |
+| `/cameras` | Camera management CRUD |
 
-* active alerts
-* alert history
-* severity indicators
-
-## Main Path
-
-```bash id="bgdnhu"
-frontend/app/alerts/
-```
-
----
-
-## 6.3 Analytics Dashboard
-
-Displays:
-
-* occupancy charts
-* heatmaps
-* entry/exit reports
-
-## Main Path
-
-```bash id="mp4d2n"
-frontend/app/analytics/
-```
-
----
-
-## 6.4 Frontend State Management
-
-The frontend manages state using:
-
-* Zustand for live state
-* React Query for cached API data
-
-## Main Components
-
-```bash id="d64p48"
-frontend/lib/store.ts
-frontend/lib/api.ts
-```
+State: Zustand (live) + React Query (cached API)
 
 ---
 
 # 7. Infrastructure Layer
 
-The infrastructure layer supports deployment and service orchestration.
-
----
-
-## Services
-
-* PostgreSQL
-* Redis
-* Backend API
-* Frontend Dashboard
-
-## Local Deployment
-
-```bash id="h3lggp"
-docker-compose.yml
-```
-
-## Production Deployment
-
-```bash id="xdpmja"
-docker-compose.prod.yml
-```
+- **PostgreSQL** — persistent storage
+- **Redis** — messaging bus
+- **FastAPI** — backend API + WebSocket
+- **Next.js** — frontend
+- **Docker Compose** — local orchestration
+- **Kubernetes** — production deployment
 
 ---
 
 # 8. Real-Time Processing Sequence
 
-The sequence below describes what happens when a new frame arrives:
-
-```bash id="8a5qzx"
-1. CameraWorker reads a frame
-2. Frame sent to AI pipeline
-3. Detector finds persons
-4. Tracker assigns IDs
-5. Business logic generates events
-6. Frame annotated
-7. Result published to Redis
-8. WebSocket manager broadcasts to dashboard
-9. Events stored in PostgreSQL
 ```
-
-This sequence repeats continuously for every active camera.
+1. Operator draws counting line via line_selector (once at startup)
+2. CameraWorker opens video / RTSP stream
+3. Frame read → pipeline.process_frame()
+4. YOLOv8n detects persons → List[Detection]
+5. ByteTrack assigns stable IDs → List[TrackedObject]
+6. TrackManager updates ACTIVE/LOST/REMOVED states → List[TrackEvent]
+7. EntryExitCounter checks line crossings
+8. ZoneMonitor checks polygon occupancy
+9. BehaviorAnalyzer checks loitering
+10. HeatmapGenerator accumulates density
+11. AlertEngine generates structured AlertEvents
+12. FrameAnnotator draws overlays
+13. Result published to Redis
+14. WebSocket Manager broadcasts to dashboard
+15. Events stored in PostgreSQL
+```
 
 ---
 
 # 9. Scalability Model
 
-The architecture supports scaling at three levels:
-
----
-
-## Level 1 — Single Machine
-
-All services run together:
-
-* backend
-* Redis
-* PostgreSQL
-* frontend
-
-Suitable for:
-
-* local development
-* small deployments
-
----
-
-## Level 2 — Worker Separation
-
-Separate AI workers from API services.
-
-Suitable for:
-
-* multiple cameras
-* dedicated GPU worker nodes
-
----
-
-## Level 3 — Cloud Deployment
-
-Deploy services independently:
-
-* AI workers
-* backend API
-* Redis
-* PostgreSQL
-* frontend
-
-Suitable for:
-
-* production environments
-* horizontal scaling
+| Level | Description | Suitable For |
+|---|---|---|
+| 1 — Single Machine | All services together | Dev / small deployments |
+| 2 — Worker Separation | AI workers separate from API | Multiple cameras, GPU nodes |
+| 3 — Cloud | All services independent | Production, horizontal scaling |
 
 ---
 
 # 10. Design Principles
 
-The architecture follows these principles:
+- **Separation of Concerns** — AI / backend / frontend each have one responsibility
+- **Decoupling** — Redis separates AI workers from WebSocket delivery
+- **Modularity** — each analyzer plugs into Pipeline independently
+- **Defensive Processing** — all pipeline stages catch exceptions; one bad frame never crashes the loop
+- **Scalability** — workers scale independently from API and frontend
 
 ---
 
-## Separation of Concerns
+# 11. Phase Status
 
-Each layer has a single responsibility:
-
-* AI handles inference
-* backend handles delivery
-* frontend handles visualization
-
----
-
-## Decoupling
-
-Redis separates:
-
-* AI workers
-* WebSocket delivery
-* API services
-
-This reduces service dependency and improves resilience.
-
----
-
-## Scalability
-
-Workers can be scaled independently from frontend or backend.
-
----
-
-## Maintainability
-
-Each module is isolated and testable.
-
----
-
-## Extensibility
-
-Future features can be added without changing the core flow, such as:
-
-* weapon detection
-* Re-ID
-* authentication
-* advanced analytics
-
----
-
-# 11. Architecture Summary
-
-The Smart Vision System architecture transforms raw video streams into:
-
-* live analytics
-* business insights
-* security alerts
-
-through a modular layered pipeline:
-
-```bash id="5r5rvu"
-Camera → AI Pipeline → Redis → Backend → Frontend
-```
-
-This design ensures:
-
-* real-time responsiveness
-* modularity
-* scalability
-* production readiness
+| Phase | Scope | Status |
+|---|---|---|
+| Phase 1 | Full AI layer — detection, tracking, business logic, annotation | ✅ Complete |
+| Phase 2 | Backend — FastAPI, PostgreSQL, Redis, WebSocket, REST API, Workers | 🔲 Next |
+| Phase 3 | Frontend — Next.js dashboard | 🔲 Planned |

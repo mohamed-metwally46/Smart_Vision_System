@@ -16,6 +16,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",          # ignore unknown env vars (e.g. NEXT_PUBLIC_*, POSTGRES_USER)
     )
 
     # ── Database ───────────────────────────────────────────────────────────────
@@ -46,6 +47,15 @@ class Settings(BaseSettings):
     # ── Worker ────────────────────────────────────────────────────────────────
     MAX_FPS: int = 15
     JPEG_QUALITY: int = 75
+
+    # ── JWT Authentication ─────────────────────────────────────────────────────
+    JWT_SECRET_KEY: str = "change-me-in-production-min-32-chars"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_HOURS: int = 8
+
+    # ── First superuser (seeded automatically on first startup) ───────────────
+    FIRST_SUPERUSER: str = "admin"
+    FIRST_SUPERUSER_PASSWORD: str = "changeme"
 
 
 settings = Settings()
