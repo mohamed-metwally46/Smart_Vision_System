@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from "react";
+import { wsUrl } from "@/lib/auth";
 import type { ConnectionStatus } from "@/types";
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:3000";
 const RECONNECT_DELAY_MS = 3_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
@@ -33,7 +33,7 @@ export function useWebSocket<T>({
 
     setStatus("connecting");
 
-    const url = `${WS_URL}${path}`;
+    const url = wsUrl(path);
     const ws = new WebSocket(url);
     wsRef.current = ws;
 

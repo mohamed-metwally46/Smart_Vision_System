@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import { useWebSocket } from "./useWebSocket";
+import { isAuthenticated } from "@/lib/auth";
 import { useAlertsStore } from "@/lib/store";
 import type { WSAlert, ConnectionStatus } from "@/types";
 
@@ -25,6 +26,6 @@ export function useAlertsStream() {
     path: "/ws/alerts",
     onMessage,
     onStatusChange,
-    enabled: true,
+    enabled: isAuthenticated(),
   });
 }

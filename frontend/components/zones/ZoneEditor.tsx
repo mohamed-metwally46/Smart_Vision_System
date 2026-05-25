@@ -5,6 +5,7 @@ import { useMutation } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api";
 import { Camera, Zone } from "@/types";
 import { useCameraStream } from "@/hooks/useCameraStream";
+import { useCameraStreamStore } from "@/lib/store";
 
 interface Props {
   camera: Camera;
@@ -17,8 +18,10 @@ export default function ZoneEditor({ camera, existingZone, onSaved, onClose }: P
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<SVGSVGElement>(null);
 
-  // Live camera frame via existing hook
-  const { frame, occupancy } = useCameraStream(camera.id);
+  const streamFrame = useCameraStreamStore((s) => s.frame);
+  useCameraStream(camera.id);
+  const frameData = streamFrame?.frame;
+  const occupancy = streamFrame?.occupancy;
 
   // Polygon points in canvas pixel space
   const [points, setPoints] = useState<[number, number][]>(
@@ -35,7 +38,7 @@ export default function ZoneEditor({ camera, existingZone, onSaved, onClose }: P
 
   // ── Draw camera frame onto canvas ────────────────────────────────────────
   useEffect(() => {
-    if (!frame || !canvasRef.current) return;
+    if (!frameData || !canvasRef.current) return;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
@@ -45,8 +48,8 @@ export default function ZoneEditor({ camera, existingZone, onSaved, onClose }: P
       canvas.height = img.naturalHeight || 360;
       ctx.drawImage(img, 0, 0);
     };
-    img.src = `data:image/jpeg;base64,${frame}`;
-  }, [frame]);
+    img.src = `data:image/jpeg;base64,${frameData}`;
+  }, [frameData]);
 
   // ── Canvas click → add point ─────────────────────────────────────────────
   const handleCanvasClick = useCallback(
@@ -212,7 +215,7 @@ export default function ZoneEditor({ camera, existingZone, onSaved, onClose }: P
               />
 
               {/* No frame yet */}
-              {!frame && (
+              {!frameData && (
                 <div className="absolute inset-0 flex items-center justify-center text-surface-500 text-sm">
                   Connecting to camera stream…
                 </div>

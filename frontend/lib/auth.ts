@@ -38,7 +38,18 @@ export function isAuthenticated(): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Axios interceptor — attach Bearer token to every request
+// HTTP client for auth endpoints (no global 401 redirect on failed login)
+// ---------------------------------------------------------------------------
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+const authHttp = axios.create({
+  baseURL: `${API}/api/v1`,
+  headers: { "Content-Type": "application/json" },
+  timeout: 10_000,
+});
+
+// ---------------------------------------------------------------------------
+// Axios interceptor — attach Bearer token to every default-axios request
 // ---------------------------------------------------------------------------
 axios.interceptors.request.use((config) => {
   const token = getToken();
@@ -52,9 +63,13 @@ axios.interceptors.request.use((config) => {
 axios.interceptors.response.use(
   (res) => res,
   async (error) => {
-    if (error.response?.status === 401) {
+    const url = error.config?.url ?? "";
+    const isAuthTokenRequest =
+      typeof url === "string" && url.includes("/auth/token");
+
+    if (error.response?.status === 401 && !isAuthTokenRequest) {
       clearToken();
-      // Redirect to login — works in both App Router and Pages Router
+      clearAuthCookie();
       if (typeof window !== "undefined") {
         window.location.href = "/login";
       }
@@ -66,16 +81,15 @@ axios.interceptors.response.use(
 // ---------------------------------------------------------------------------
 // API calls
 // ---------------------------------------------------------------------------
-const API = process.env.NEXT_PUBLIC_API_URL ?? "";
-
 export interface LoginResponse {
   access_token: string;
   token_type: string;
   expires_in: number;
 }
 
+/** POST /api/v1/auth/token — expects JSON body matching backend LoginRequest */
 export async function login(username: string, password: string): Promise<void> {
-  const { data } = await axios.post<LoginResponse>(`${API}/api/v1/auth/token`, {
+  const { data } = await authHttp.post<LoginResponse>("/auth/token", {
     username: username.trim(),
     password,
   });
@@ -84,7 +98,13 @@ export async function login(username: string, password: string): Promise<void> {
 }
 
 export async function refreshToken(): Promise<void> {
-  const { data } = await axios.post<LoginResponse>(`${API}/api/v1/auth/refresh`);
+  const { data } = await authHttp.post<LoginResponse>(
+    "/auth/refresh",
+    {},
+    {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    }
+  );
   setToken(data.access_token, data.expires_in);
 }
 
@@ -101,7 +121,10 @@ export function logout(): void {
  * Usage: const ws = new WebSocket(wsUrl("/ws/cameras/1"))
  */
 export function wsUrl(path: string): string {
-  const base = (process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:3000").replace(/\/$/, "");
+  const base = (process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000").replace(
+    /\/$/,
+    ""
+  );
   const token = getToken();
   const query = token ? `?token=${encodeURIComponent(token)}` : "";
   return `${base}${path}${query}`;

@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import type { WSCameraFrame } from "@/types";
 import { Users, TrendingUp, TrendingDown, Activity } from "lucide-react";
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3000";
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export default function AnalyticsPage() {
   const activeCameraId = useCamerasStore((s) => s.activeCameraId);

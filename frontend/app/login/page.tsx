@@ -1,47 +1,55 @@
 "use client";
 
-import { useState, FormEvent } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { login } from "@/lib/auth";
+import { parseApiError } from "@/lib/apiError";
+import { loginSchema, type LoginFormValues } from "@/lib/schemas/login";
+import clsx from "clsx";
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const searchParams = useSearchParams();
+  const redirectTo = searchParams.get("from") ?? "/monitor";
 
-  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setError(null);
-    setLoading(true);
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting },
+    setError,
+  } = useForm<LoginFormValues>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { username: "", password: "" },
+  });
+
+  async function onSubmit(values: LoginFormValues) {
     try {
-      await login(username, password);
-      router.replace("/monitor");
+      await login(values.username, values.password);
+      const target =
+        redirectTo.startsWith("/") && !redirectTo.startsWith("/login")
+          ? redirectTo
+          : "/monitor";
+      router.replace(target);
     } catch (err: unknown) {
-      const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data
-          ?.detail ??
-        (err as Error).message ??
-        "Login failed. Check your credentials.";
-      setError(msg);
-    } finally {
-      setLoading(false);
+      setError("root", { message: parseApiError(err) });
     }
   }
 
+  const rootError = errors.root?.message;
+
   return (
-    <div className="min-h-screen flex items-center justify-center bg-surface-900">
+    <div className="min-h-screen flex items-center justify-center bg-surface-900 px-4">
       <div className="w-full max-w-sm bg-surface-800 rounded-2xl shadow-xl p-8 border border-surface-700">
-        {/* Logo / Title */}
         <div className="mb-8 text-center">
           <div className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-accent/10 mb-3">
-            {/* Camera icon */}
             <svg
               className="w-7 h-7 text-accent"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
+              aria-hidden
             >
               <path
                 strokeLinecap="round"
@@ -51,62 +59,108 @@ export default function LoginPage() {
               />
             </svg>
           </div>
-          <h1 className="text-xl font-bold text-white tracking-wide">Smart Vision System</h1>
-          <p className="text-sm text-surface-400 mt-1">Sign in to access the dashboard</p>
+          <h1 className="text-xl font-bold text-white tracking-wide">
+            Smart Vision System
+          </h1>
+          <p className="text-sm text-surface-400 mt-1">
+            Sign in to access the dashboard
+          </p>
         </div>
 
-        {/* Error */}
-        {error && (
-          <div className="mb-4 rounded-lg bg-severity-high/10 border border-severity-high/40 px-4 py-3 text-sm text-severity-high">
-            {error}
+        {rootError && (
+          <div
+            role="alert"
+            className="mb-4 rounded-lg bg-severity-high/10 border border-severity-high/40 px-4 py-3 text-sm text-severity-high"
+          >
+            {rootError}
           </div>
         )}
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
           <div>
-            <label className="block text-xs font-medium text-surface-300 mb-1.5 uppercase tracking-wider">
+            <label
+              htmlFor="username"
+              className="block text-xs font-medium text-surface-300 mb-1.5 uppercase tracking-wider"
+            >
               Username
             </label>
             <input
+              id="username"
               type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              required
               autoComplete="username"
-              className="w-full bg-surface-900 border border-surface-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition"
+              aria-invalid={!!errors.username}
+              className={clsx(
+                "w-full bg-surface-900 border rounded-lg px-4 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition",
+                errors.username ? "border-severity-high" : "border-surface-600"
+              )}
               placeholder="admin"
+              {...register("username")}
             />
+            {errors.username && (
+              <p className="mt-1.5 text-xs text-severity-high">
+                {errors.username.message}
+              </p>
+            )}
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-surface-300 mb-1.5 uppercase tracking-wider">
+            <label
+              htmlFor="password"
+              className="block text-xs font-medium text-surface-300 mb-1.5 uppercase tracking-wider"
+            >
               Password
             </label>
             <input
+              id="password"
               type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
               autoComplete="current-password"
-              className="w-full bg-surface-900 border border-surface-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition"
+              aria-invalid={!!errors.password}
+              className={clsx(
+                "w-full bg-surface-900 border rounded-lg px-4 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition",
+                errors.password ? "border-severity-high" : "border-surface-600"
+              )}
               placeholder="••••••••"
+              {...register("password")}
             />
+            {errors.password && (
+              <p className="mt-1.5 text-xs text-severity-high">
+                {errors.password.message}
+              </p>
+            )}
           </div>
 
           <button
             type="submit"
-            disabled={loading || !username || !password}
+            disabled={isSubmitting}
             className="w-full mt-2 bg-accent hover:bg-accent/80 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-2.5 rounded-lg transition text-sm"
           >
-            {loading ? "Signing in…" : "Sign In"}
+            {isSubmitting ? "Signing in…" : "Sign In"}
           </button>
         </form>
 
-        <p className="mt-6 text-center text-xs text-surface-500">
+        <p className="mt-4 text-center text-xs text-surface-500">
+          First-time default: <span className="font-mono text-surface-400">admin</span> /{" "}
+          <span className="font-mono text-surface-400">changeme</span>
+        </p>
+
+        <p className="mt-4 text-center text-xs text-surface-500">
           Smart Vision System · Graduation Project
         </p>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen flex items-center justify-center bg-surface-900 text-surface-400 text-sm">
+          Loading…
+        </div>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   );
 }

@@ -15,13 +15,37 @@ import type {
   PaginatedResponse,
 } from "@/types";
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3000";
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 const client = axios.create({
   baseURL: `${BASE_URL}/api/v1`,
   headers: { "Content-Type": "application/json" },
   timeout: 10_000,
 });
+
+import { getToken, clearToken } from "@/lib/auth";
+
+client.interceptors.request.use((config) => {
+  const token = getToken();
+  if (token) {
+    config.headers = config.headers ?? {};
+    config.headers["Authorization"] = `Bearer ${token}`;
+  }
+  return config;
+});
+
+client.interceptors.response.use(
+  (res) => res,
+  (error) => {
+    if (error.response?.status === 401) {
+      clearToken();
+      if (typeof window !== "undefined") {
+        window.location.href = "/login";
+      }
+    }
+    return Promise.reject(error);
+  }
+);
 
 export const apiClient = {
   getCameras: () => client.get<Camera[]>('/cameras').then((r) => r.data),
@@ -71,7 +95,7 @@ export const alertsApi = {
       .then((r) => r.data),
 
   get: (id: number) =>
-    apiClient.get<Alert>(`/alerts/${id}`).then((r) => r.data),
+    client.get<Alert>(`/alerts/${id}`).then((r) => r.data),
 };
 
 // ─── Analytics ──────────────────────────────────────────────────────────────

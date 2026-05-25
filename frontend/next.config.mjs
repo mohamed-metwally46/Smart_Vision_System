@@ -1,5 +1,6 @@
 // @ts-check
  
+/** @param {string} phase @param {{ defaultConfig: import('next').NextConfig }} context */
 export default (phase, { defaultConfig }) => {
   /**
    * @type {import('next').NextConfig}

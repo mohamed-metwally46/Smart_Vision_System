@@ -1,17 +1,22 @@
 # ── Smart Vision System — Docker Compose (Development) ────────────────────────
 #
 # Starts the full stack locally:
-#   postgres  → database
-#   redis     → message broker + pub/sub
-#   backend   → FastAPI + AI pipeline (hot-reload)
-#   celery    → camera workers
-#   alert_worker → alert persistence worker
+#   postgres       → database
+#   redis          → message broker + pub/sub
+#   backend        → FastAPI + AI pipeline (hot-reload)
+#   celery_cameras → camera AI inference workers
+#   celery_alerts  → alert persistence worker
 #
 # Usage:
-#   docker compose up -d          # start all services
-#   docker compose logs -f        # follow all logs
-#   docker compose down           # stop all services
-#   docker compose down -v        # stop + delete volumes (fresh start)
+#   docker compose up -d                      # start all services
+#   docker compose up postgres redis -d       # infra only (for local dev)
+#   docker compose logs -f                    # follow all logs
+#   docker compose down                       # stop all services
+#   docker compose down -v                    # stop + delete volumes (fresh start)
+#
+# Import convention:
+#   All Python imports use  `from backend.app.xxx`
+#   WORKDIR is /  so  backend/ → /backend/  and Python resolves correctly.
 
 services:
 
@@ -63,8 +68,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       DEBUG: "true"
     volumes:
-      - ./backend:/app          # hot-reload: code changes reflect immediately
-      - ./models:/app/models    # model weights shared with workers
+      - ./backend:/backend        # hot-reload: maps to /backend inside container
+      - ./models:/backend/models  # shared model weights
     ports:
       - "3000:3000"
     depends_on:
@@ -85,7 +90,6 @@ services:
       start_period: 20s
 
   # ── Celery Camera Workers ─────────────────────────────────────────────────────
-  # Handles per-camera AI inference tasks dispatched by the REST API.
   celery_cameras:
     build:
       context: ./backend
@@ -97,8 +101,8 @@ services:
       POSTGRES_URL: postgresql+asyncpg://svs:svs@postgres:5432/svs
       REDIS_URL: redis://redis:6379/0
     volumes:
-      - ./backend:/app
-      - ./models:/app/models
+      - ./backend:/backend
+      - ./models:/backend/models
     depends_on:
       redis:
         condition: service_healthy
@@ -111,8 +115,6 @@ services:
       -Q cameras
 
   # ── Celery Alert Worker ───────────────────────────────────────────────────────
-  # Singleton worker: subscribes to Redis alert + frame channels,
-  # persists Alert and Event rows to PostgreSQL.
   celery_alerts:
     build:
       context: ./backend
@@ -124,8 +126,8 @@ services:
       POSTGRES_URL: postgresql+asyncpg://svs:svs@postgres:5432/svs
       REDIS_URL: redis://redis:6379/0
     volumes:
-      - ./backend:/app
-      - ./models:/app/models
+      - ./backend:/backend
+      - ./models:/backend/models
     depends_on:
       redis:
         condition: service_healthy
@@ -136,6 +138,25 @@ services:
       --loglevel=info
       --concurrency=1
       -Q alerts
+
+  # ── Frontend (Next.js) — Phase 3 ──────────────────────────────────────────────
+  frontend:
+    image: node:20-alpine
+    container_name: svs_frontend
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    ports:
+      - "3001:3001"
+    depends_on:
+      - backend
+    command: sh -c "npm install && npm run dev"
+    profiles:
+      - frontend    # only starts with: docker compose --profile frontend up
+
+networks:
+  svs_network:
+    driver: bridge
 
 volumes:
   postgres_data:
