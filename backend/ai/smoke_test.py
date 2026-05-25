@@ -150,10 +150,13 @@ def main() -> None:
         result = pipeline.process_frame(frame, annotate=False)
         t_pipeline = (time.perf_counter() - t0) * 1000.0
 
-        # Collect loitering IDs from business events
+        # Collect events from business events
+        weapon_detected = False
         for evt in result.business_events:
             if evt.get("type") == "loitering":
                 loitering_ids.add(evt["track_id"])
+            elif evt.get("type") == "weapon_alert":
+                weapon_detected = True
 
         # Remove loitering flag if track disappeared
         active_ids = {t.track_id for t in result.tracks}
@@ -176,6 +179,15 @@ def main() -> None:
             frame_index=result.frame_index,
             processing_ms=t_pipeline,
         )
+
+        if weapon_detected:
+            # Draw a prominent red alert bar
+            cv2.rectangle(canvas, (0, 0), (width, 40), (0, 0, 255), -1)
+            cv2.putText(
+                canvas, "!!! WEAPON DETECTED !!!", (width // 2 - 150, 30),
+                cv2.FONT_HERSHEY_DUPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA
+            )
+            logger.warning("Weapon detected in frame %d", result.frame_index)
 
         # Optional heatmap overlay
         if show_heatmap and heatmap_gen._total_hits > 0:

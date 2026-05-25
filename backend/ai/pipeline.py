@@ -26,6 +26,7 @@ from typing import List, Optional
 import numpy as np
 
 from .detector.person_detector import Detection, PersonDetector
+from .detector.weapon_detector import WeaponDetector
 from .tracker.bytetrack_wrapper import ByteTrackWrapper, TrackedObject
 from .tracker.track_manager import Track, TrackEvent, TrackManager
 
@@ -49,6 +50,8 @@ class PipelineResult:
         ``None`` if annotation was skipped (e.g., ``annotate=False``).
     detections:
         Raw detections from the person detector (before tracking).
+    weapon_detections:
+        Raw detections from the weapon detector.
     tracks:
         Active tracks with stable IDs after ByteTrack association.
     events:
@@ -56,7 +59,6 @@ class PipelineResult:
     business_events:
         Higher-level events from business logic analyzers
         (entry/exit, zone alerts, loitering flags, etc.).
-        Populated in Step 7-10 once business_logic modules are wired in.
     frame_index:
         Zero-based frame counter incremented each call.
     timestamp:
@@ -67,6 +69,7 @@ class PipelineResult:
 
     annotated_frame: Optional[np.ndarray]
     detections: List[Detection]
+    weapon_detections: List[Detection] = field(default_factory=list)
     tracks: List[Track]
     events: List[TrackEvent]
     business_events: List[dict] = field(default_factory=list)
@@ -86,30 +89,25 @@ class Pipeline:
 
     One instance per camera.  Not thread-safe — call from a single asyncio
     task or Celery worker per camera.
-
-    Usage
-    -----
-    >>> pipeline = Pipeline(model_path="models/yolov8n.pt")
-    >>> result = pipeline.process_frame(frame)
-    >>> cv2.imshow("SVS", result.annotated_frame)
-
-    To run without annotation (e.g., headless worker):
-    >>> result = pipeline.process_frame(frame, annotate=False)
     """
 
     def __init__(
         self,
         model_path: str | Path = "models/yolov8n.pt",
+        weapon_model_path: str | Path = "models/yolov8n.pt",
         confidence_threshold: float = 0.4,
         frame_rate: int = 30,
         max_frames_lost: int = 45,
         imgsz: int = 640,
+        weapon_imgsz: int = 416,
     ) -> None:
         """
         Parameters
         ----------
         model_path:
-            Path to YOLOv8n weights file.
+            Path to YOLOv8n weights file for persons.
+        weapon_model_path:
+            Path to fine-tuned weights for weapons.
         confidence_threshold:
             Minimum YOLO confidence to accept a detection.
         frame_rate:
@@ -117,12 +115,19 @@ class Pipeline:
         max_frames_lost:
             Frames a track can be lost before being permanently removed.
         imgsz:
-            YOLO inference image size.
+            YOLO inference image size for persons.
+        weapon_imgsz:
+            YOLO inference image size for weapons.
         """
         self._detector = PersonDetector(
             model_path=model_path,
             confidence_threshold=confidence_threshold,
             imgsz=imgsz,
+        )
+        self._weapon_detector = WeaponDetector(
+            model_path=weapon_model_path,
+            confidence_threshold=confidence_threshold,
+            imgsz=weapon_imgsz,
         )
         self._tracker = ByteTrackWrapper(
             frame_rate=frame_rate,
@@ -130,20 +135,14 @@ class Pipeline:
         )
         self._track_manager = TrackManager(max_frames_lost=max_frames_lost)
 
-        # Business logic analyzers are registered here in Steps 7-10.
-        # Each analyzer must implement: analyze(tracks, events) -> List[dict]
         self._analyzers: list = []
-
-        # Frame-level annotation is lazy-imported to avoid circular imports
-        # and to keep the AI layer independent of display concerns.
         self._annotator = None
 
         self._frame_index: int = 0
         logger.info(
-            "Pipeline initialised | model=%s | conf=%.2f | fps=%d",
+            "Pipeline initialised | person_model=%s | weapon_model=%s",
             Path(model_path).name,
-            confidence_threshold,
-            frame_rate,
+            Path(weapon_model_path).name,
         )
 
     # ------------------------------------------------------------------
@@ -157,25 +156,12 @@ class Pipeline:
     ) -> PipelineResult:
         """
         Run the full AI pipeline on a single frame.
-
-        Parameters
-        ----------
-        frame:
-            BGR image from OpenCV (``cap.read()``).
-        annotate:
-            If True, draw bounding boxes / IDs on a copy of the frame.
-            Set False for headless/Redis publishing to save CPU.
-
-        Returns
-        -------
-        PipelineResult
-            Always returned, even on partial failure.
-            Check ``result.detections`` / ``result.tracks`` for content.
         """
         t_start = time.perf_counter()
         self._frame_index += 1
 
         detections: List[Detection] = []
+        weapon_detections: List[Detection] = []
         tracked_objects: List[TrackedObject] = []
         track_events: List[TrackEvent] = []
         business_events: List[dict] = []
@@ -184,13 +170,28 @@ class Pipeline:
         # ---- Stage 1: Detection ----------------------------------------
         try:
             detections = self._detector.detect(frame)
+            weapon_detections = self._weapon_detector.detect(frame)
+            
+            # Combine all detections for tracking layer
+            all_detections = detections + weapon_detections
+            
+            # Generate weapon alerts immediately
+            for wd in weapon_detections:
+                business_events.append({
+                    "type": "weapon_alert",
+                    "severity": "critical",
+                    "confidence": wd.confidence,
+                    "bbox": wd.bbox,
+                    "timestamp": time.time(),
+                    "message": "!!! WEAPON DETECTED !!!"
+                })
         except Exception as exc:
             logger.error("[Frame %d] Detection failed: %s", self._frame_index, exc, exc_info=True)
 
         # ---- Stage 2: Tracking -----------------------------------------
         try:
             h, w = frame.shape[:2]
-            tracked_objects = self._tracker.update(detections, frame_shape=(h, w))
+            tracked_objects = self._tracker.update(all_detections, frame_shape=(h, w))
         except Exception as exc:
             logger.error("[Frame %d] Tracking failed: %s", self._frame_index, exc, exc_info=True)
 
@@ -202,43 +203,32 @@ class Pipeline:
 
         active_tracks = self._track_manager.get_active_tracks()
 
-        # ---- Stage 4: Business logic analyzers (Steps 7-10) ------------
+        # ---- Stage 4: Business logic analyzers ------------------------
         for analyzer in self._analyzers:
             try:
                 events = analyzer.analyze(active_tracks, track_events)
                 business_events.extend(events)
             except Exception as exc:
-                logger.error(
-                    "[Frame %d] Analyzer %s failed: %s",
-                    self._frame_index,
-                    type(analyzer).__name__,
-                    exc,
-                    exc_info=True,
-                )
+                logger.error("[Frame %d] Analyzer %s failed: %s", self._frame_index, type(analyzer).__name__, exc, exc_info=True)
+
+        processing_ms = (time.perf_counter() - t_start) * 1000.0
 
         # ---- Stage 5: Annotation ----------------------------------------
         if annotate:
             try:
-                annotated_frame = self._annotate(frame, active_tracks)
+                if self._annotator:
+                    # Logic for full-featured annotator if needed
+                    # (Currently smoke test calls annotator manually)
+                    pass
+                annotated_frame = self._annotate(frame, active_tracks, weapon_detections)
             except Exception as exc:
                 logger.error("[Frame %d] Annotation failed: %s", self._frame_index, exc, exc_info=True)
                 annotated_frame = frame.copy()
 
-        processing_ms = (time.perf_counter() - t_start) * 1000.0
-
-        logger.debug(
-            "[Frame %d] det=%d trk=%d evt=%d biz=%d %.1f ms",
-            self._frame_index,
-            len(detections),
-            len(active_tracks),
-            len(track_events),
-            len(business_events),
-            processing_ms,
-        )
-
         return PipelineResult(
             annotated_frame=annotated_frame,
             detections=detections,
+            weapon_detections=weapon_detections,
             tracks=active_tracks,
             events=track_events,
             business_events=business_events,
@@ -248,20 +238,10 @@ class Pipeline:
         )
 
     def register_analyzer(self, analyzer) -> None:
-        """
-        Register a business-logic analyzer with the pipeline.
-
-        The analyzer must implement:
-            analyze(tracks: List[Track], events: List[TrackEvent]) -> List[dict]
-
-        Called in Steps 7-10 when entry_exit_counter, zone_monitor,
-        behavior_analyzer, and heatmap_generator are added.
-        """
         self._analyzers.append(analyzer)
         logger.info("Registered analyzer: %s", type(analyzer).__name__)
 
     def reset(self) -> None:
-        """Reset tracker and track manager state (e.g., on camera reconnect)."""
         self._tracker.reset()
         self._track_manager.reset()
         self._frame_index = 0
@@ -271,37 +251,33 @@ class Pipeline:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _annotate(self, frame: np.ndarray, tracks: List[Track]) -> np.ndarray:
-        """
-        Draw bounding boxes and track IDs on a copy of *frame*.
-
-        A full-featured annotator lives in frame_annotator.py (Step 11).
-        This minimal inline version keeps the pipeline self-contained for
-        the smoke test in Steps 1-6.
-        """
-        import cv2  # local import — not available in all server contexts
+    def _annotate(self, frame: np.ndarray, tracks: List[Track], weapon_detections: List[Detection] = None) -> np.ndarray:
+        import cv2
 
         canvas = frame.copy()
+        # Draw tracks
         for track in tracks:
             x1, y1, x2, y2 = track.bbox
             color = self._id_to_color(track.track_id)
             cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
-            label = f"ID:{track.track_id}  {track.confidence:.2f}"
-            cv2.putText(
-                canvas,
-                label,
-                (x1, max(y1 - 8, 12)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                color,
-                2,
-                cv2.LINE_AA,
-            )
+            label = f"ID:{track.track_id} {track.confidence:.2f}"
+            cv2.putText(canvas, label, (x1, max(y1 - 8, 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
+        
+        # Draw weapons
+        if weapon_detections:
+            for wd in weapon_detections:
+                x1, y1, x2, y2 = wd.bbox
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                cv2.putText(canvas, "WEAPON!", (x1, max(y1 - 12, 20)), cv2.FONT_HERSHEY_DUPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
+            
+            # Visual Alert bar
+            cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 40), (0, 0, 255), -1)
+            cv2.putText(canvas, "!!! WEAPON DETECTED !!!", (canvas.shape[1] // 2 - 150, 30), cv2.FONT_HERSHEY_DUPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
+
         return canvas
 
     @staticmethod
     def _id_to_color(track_id: int) -> tuple[int, int, int]:
-        """Map track ID to a deterministic BGR colour."""
         palette = [
             (255, 56, 56), (255, 157, 151), (255, 112, 31), (255, 178, 29),
             (207, 210, 49), (72, 249, 10), (146, 204, 23), (61, 219, 134),
@@ -312,58 +288,26 @@ class Pipeline:
         return palette[track_id % len(palette)]
 
 
-# ---------------------------------------------------------------------------
-# CLI smoke-test entry point (Step 6 golden-rule validation)
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
     import sys
     import cv2
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s")
 
     video_source = sys.argv[1] if len(sys.argv) > 1 else 0
     model_path = sys.argv[2] if len(sys.argv) > 2 else "models/yolov8n.pt"
 
-    pipeline = Pipeline(model_path=model_path)
+    pipeline = Pipeline(model_path=model_path, weapon_model_path=model_path) # Default both to same for test
 
     cap = cv2.VideoCapture(video_source)
     if not cap.isOpened():
-        logger.error("Cannot open video source: %s", video_source)
         sys.exit(1)
-
-    logger.info("Starting smoke test. Press 'q' to quit.")
 
     while True:
         ret, frame = cap.read()
-        if not ret:
-            logger.info("End of stream reached.")
-            break
-
+        if not ret: break
         result = pipeline.process_frame(frame, annotate=True)
-
-        # Overlay frame index and processing time
-        cv2.putText(
-            result.annotated_frame,
-            f"Frame:{result.frame_index}  {result.processing_time_ms:.1f}ms  "
-            f"det:{len(result.detections)}  trk:{len(result.tracks)}",
-            (10, 28),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (0, 255, 0),
-            2,
-            cv2.LINE_AA,
-        )
-
-        cv2.imshow("SVS — AI Pipeline Smoke Test", result.annotated_frame)
-
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            logger.info("User quit.")
-            break
-
+        cv2.imshow("SVS", result.annotated_frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"): break
     cap.release()
     cv2.destroyAllWindows()
-    logger.info("Smoke test complete.")

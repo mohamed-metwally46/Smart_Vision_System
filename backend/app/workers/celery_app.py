@@ -104,7 +104,7 @@ def start_camera_worker(
     """
     # Late import to avoid circular dependencies at module load
     from backend.app.workers.camera_worker import run_camera_worker
-    from ai.pipeline import AIPipeline
+    from backend.ai.pipeline import Pipeline
 
     effective_redis_url = redis_url or settings.REDIS_URL
     task_id = self.request.id
@@ -114,13 +114,18 @@ def start_camera_worker(
         task_id, camera_id, source,
     )
 
-    # ── Create a stop event so task revocation works ──────────────────────────
+    # ── Create a stop event so task revocation works ──────────────────────
     stop_event = asyncio.Event()
     with _lock:
         _active_stop_events[task_id] = stop_event
 
-    # ── Build the AI pipeline once per task (model stays in memory) ───────────
-    pipeline = AIPipeline()
+    # ── Build the AI pipeline once per task (model stays in memory) ──────────
+    pipeline = Pipeline(
+        model_path=settings.MODEL_PATH,
+        weapon_model_path=settings.WEAPON_MODEL_PATH,
+        weapon_imgsz=settings.WEAPON_IMGSZ
+    )
+
 
     # ── Run the asyncio coroutine in a new event loop ─────────────────────────
     # Celery workers are synchronous processes; we spin our own loop here.

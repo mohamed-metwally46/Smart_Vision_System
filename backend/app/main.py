@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from backend.app.config import settings
 from backend.app.websocket.manager import manager as ws_manager
@@ -96,27 +97,20 @@ def create_app() -> FastAPI:
     app.include_router(health_router,    prefix=f"{api_prefix}/health",            tags=["health"])
     app.include_router(logs_router,      prefix=f"{api_prefix}/logs",              tags=["logs"])
 
+    # ── Static Files (Heatmaps, etc.) ─────────────────────────────────────────
+    from backend.app.core.storage import STATIC_DIR
+    STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
     # ── WebSocket: per-camera frame stream ────────────────────────────────────
     @app.websocket("/ws/cameras/{camera_id}")
     async def camera_stream_ws(websocket: WebSocket, camera_id: int):
         """
         WebSocket endpoint — streams annotated JPEG frames + events.
-
-        Message schema (matches api-reference.md §8.1):
-        {
-            "camera_id": int,
-            "timestamp": str,
-            "frame": str (base64 JPEG),
-            "occupancy": int,
-            "tracks": [{"track_id": int, "bbox": [x,y,w,h]}]
-        }
         """
         await ws_manager.connect(websocket, camera_id)
         try:
-            # Keep the connection alive; the Redis listener pushes data to the client.
-            # We still need to consume incoming messages to detect disconnect.
             while True:
-                # receive_text() raises WebSocketDisconnect on client close
                 await websocket.receive_text()
         except WebSocketDisconnect:
             pass
@@ -130,18 +124,7 @@ def create_app() -> FastAPI:
     async def alerts_ws(websocket: WebSocket):
         """
         WebSocket endpoint — streams live alert notifications from all cameras.
-
-        Message schema (matches api-reference.md §8.2):
-        {
-            "id": int,
-            "camera_id": int,
-            "type": str,
-            "severity": str,
-            "message": str,
-            "timestamp": str
-        }
         """
-        # Reuse the manager: subscribe to a virtual "alerts" channel
         await ws_manager.connect(websocket, "alerts")
         try:
             while True:
@@ -163,6 +146,3 @@ def create_app() -> FastAPI:
 
 # ── ASGI entry-point ──────────────────────────────────────────────────────────
 app = create_app()
-
-# Run with:
-#   uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload

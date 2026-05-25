@@ -9,12 +9,7 @@ Draws:
   - Virtual entry/exit line with IN/OUT counters
   - Loitering indicator (flashing border or warning label)
   - Processing metadata overlay (FPS, frame count)
-
-Design constraints:
-  - Pure OpenCV — no YOLO / ByteTrack / FastAPI imports
-  - Receives structured data from PipelineResult — no raw model output
-  - Called from Pipeline.process_frame() or run in a separate thread
-    (see handoff risk note: run annotator separately from inference loop)
+  - Weapon detections with prominent alerts
 """
 
 from __future__ import annotations
@@ -28,6 +23,7 @@ import cv2
 import numpy as np
 
 from .tracker.track_manager import Track
+from .detector.person_detector import Detection
 from .business_logic.zone_monitor import ZoneConfig, ZoneState
 
 logger = logging.getLogger(__name__)
@@ -59,12 +55,11 @@ def track_color(track_id: int) -> Tuple[int, int, int]:
 class AnnotationConfig:
     """
     Controls what the annotator draws and at what visual fidelity.
-
-    All attributes can be toggled for headless / lightweight modes.
     """
 
     draw_boxes: bool = True
     draw_track_ids: bool = True
+    draw_weapons: bool = True
     draw_zones: bool = True
     draw_entry_line: bool = True
     draw_counters: bool = True
@@ -83,21 +78,6 @@ class AnnotationConfig:
 class FrameAnnotator:
     """
     Stateless annotator — call ``annotate()`` once per frame.
-
-    Usage
-    -----
-    >>> annotator = FrameAnnotator()
-    >>> canvas = annotator.annotate(
-    ...     frame=raw_frame,
-    ...     tracks=result.tracks,
-    ...     zones=zone_configs,
-    ...     zone_states=zone_states,
-    ...     line_start=(0, 360), line_end=(1280, 360),
-    ...     count_in=12, count_out=9,
-    ...     loitering_ids={7, 23},
-    ...     frame_index=result.frame_index,
-    ...     processing_ms=result.processing_time_ms,
-    ... )
     """
 
     def __init__(self, config: Optional[AnnotationConfig] = None) -> None:
@@ -112,6 +92,7 @@ class FrameAnnotator:
         self,
         frame: np.ndarray,
         tracks: List[Track],
+        weapon_detections: Optional[List[Detection]] = None,
         zones: Optional[List[ZoneConfig]] = None,
         zone_states: Optional[Dict[int, ZoneState]] = None,
         line_start: Optional[Tuple[int, int]] = None,
@@ -124,32 +105,6 @@ class FrameAnnotator:
     ) -> np.ndarray:
         """
         Draw all configured annotations onto a copy of *frame*.
-
-        Parameters
-        ----------
-        frame:
-            Raw BGR frame from OpenCV.
-        tracks:
-            Active tracks from TrackManager (ACTIVE state only).
-        zones:
-            Zone configurations for polygon drawing.
-        zone_states:
-            Current occupancy state per zone_id.
-        line_start, line_end:
-            Entry/exit virtual line endpoints.
-        count_in, count_out:
-            Cumulative crossing counters.
-        loitering_ids:
-            Set of track_ids currently flagged as loitering.
-        frame_index:
-            Pipeline frame counter for metadata overlay.
-        processing_ms:
-            Pipeline processing time for metadata overlay.
-
-        Returns
-        -------
-        np.ndarray
-            Annotated BGR frame (copy of input).
         """
         canvas = frame.copy()
         loitering_ids = loitering_ids or set()
@@ -169,6 +124,9 @@ class FrameAnnotator:
         if self._cfg.draw_meta_overlay:
             self._draw_meta(canvas, frame_index, processing_ms, len(tracks))
 
+        if self._cfg.draw_weapons and weapon_detections:
+            self._draw_weapons(canvas, weapon_detections)
+
         return canvas
 
     # ------------------------------------------------------------------
@@ -187,7 +145,6 @@ class FrameAnnotator:
             color = track_color(track.track_id)
             is_loitering = track.track_id in loitering_ids
 
-            # Loitering: switch to red + thicker border
             if is_loitering:
                 draw_color = (0, 0, 255)
                 thickness = cfg.box_thickness + 2
@@ -203,28 +160,31 @@ class FrameAnnotator:
                     label += " [LOITER]"
 
                 label_y = max(y1 - 8, 14)
-                cv2.putText(
-                    canvas,
-                    label,
-                    (x1, label_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    cfg.font_scale,
-                    draw_color,
-                    cfg.font_thickness,
-                    cv2.LINE_AA,
-                )
-                # Confidence score below label
+                cv2.putText(canvas, label, (x1, label_y), cv2.FONT_HERSHEY_SIMPLEX, cfg.font_scale, draw_color, cfg.font_thickness, cv2.LINE_AA)
+                
                 conf_label = f"{track.confidence:.2f}"
-                cv2.putText(
-                    canvas,
-                    conf_label,
-                    (x1, label_y + 18),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    cfg.font_scale * 0.75,
-                    draw_color,
-                    1,
-                    cv2.LINE_AA,
-                )
+                cv2.putText(canvas, conf_label, (x1, label_y + 18), cv2.FONT_HERSHEY_SIMPLEX, cfg.font_scale * 0.75, draw_color, 1, cv2.LINE_AA)
+
+    def _draw_weapons(
+        self,
+        canvas: np.ndarray,
+        detections: List[Detection],
+    ) -> None:
+        """Draw prominent red boxes and alert bar for weapons."""
+        for det in detections:
+            x1, y1, x2, y2 = det.bbox
+            color = (0, 0, 255)
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 3)
+            
+            label = f"WEAPON {det.confidence:.2f}"
+            cv2.putText(canvas, label, (x1, max(y1 - 10, 25)), cv2.FONT_HERSHEY_DUPLEX, 0.8, color, 2, cv2.LINE_AA)
+
+        if detections:
+            h, w = canvas.shape[:2]
+            overlay = canvas.copy()
+            cv2.rectangle(overlay, (0, 0), (w, 50), (0, 0, 255), -1)
+            cv2.addWeighted(overlay, 0.6, canvas, 0.4, 0, canvas)
+            cv2.putText(canvas, "!!! SECURITY ALERT: WEAPON DETECTED !!!", (w // 2 - 250, 35), cv2.FONT_HERSHEY_DUPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
 
     def _draw_zones(
         self,
@@ -234,41 +194,22 @@ class FrameAnnotator:
     ) -> None:
         for zone in zones:
             state = zone_states.get(zone.zone_id)
-            if state is None:
-                continue
-
+            if state is None: continue
             pts = np.array(zone.polygon, dtype=np.int32)
-
-            # Colour: green when safe, red when overcrowded
             if state.alert_active:
                 zone_color = (0, 0, 200)
                 overlay_alpha = 0.25
             else:
                 zone_color = (0, 180, 0)
                 overlay_alpha = 0.15
-
-            # Semi-transparent fill
             overlay = canvas.copy()
             cv2.fillPoly(overlay, [pts], zone_color)
             cv2.addWeighted(overlay, overlay_alpha, canvas, 1 - overlay_alpha, 0, canvas)
-
-            # Solid border
             cv2.polylines(canvas, [pts], isClosed=True, color=zone_color, thickness=2)
-
-            # Zone label at centroid
             cx = int(pts[:, 0].mean())
             cy = int(pts[:, 1].mean())
-            label = f"{zone.name}  {state.occupancy}/{zone.threshold}"
-            cv2.putText(
-                canvas,
-                label,
-                (cx - 50, cy),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
+            label = f"{zone.name} {state.occupancy}/{zone.threshold}"
+            cv2.putText(canvas, label, (cx - 50, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
     def _draw_entry_line(
         self,
@@ -281,52 +222,14 @@ class FrameAnnotator:
         cv2.line(canvas, line_start, line_end, (0, 255, 255), 2, cv2.LINE_AA)
         mid_x = (line_start[0] + line_end[0]) // 2
         mid_y = (line_start[1] + line_end[1]) // 2
-        cv2.putText(
-            canvas,
-            f"IN:{count_in}  OUT:{count_out}",
-            (mid_x - 60, mid_y - 12),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (0, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
+        cv2.putText(canvas, f"IN:{count_in} OUT:{count_out}", (mid_x - 60, mid_y - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
 
-    def _draw_counters(
-        self, canvas: np.ndarray, count_in: int, count_out: int
-    ) -> None:
+    def _draw_counters(self, canvas: np.ndarray, count_in: int, count_out: int) -> None:
         h = canvas.shape[0]
         cv2.rectangle(canvas, (0, h - 50), (220, h), (0, 0, 0), -1)
-        cv2.putText(
-            canvas,
-            f"IN: {count_in}   OUT: {count_out}",
-            (8, h - 18),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (0, 255, 200),
-            2,
-            cv2.LINE_AA,
-        )
+        cv2.putText(canvas, f"IN: {count_in} OUT: {count_out}", (8, h - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 200), 2, cv2.LINE_AA)
 
-    def _draw_meta(
-        self,
-        canvas: np.ndarray,
-        frame_index: int,
-        processing_ms: float,
-        track_count: int,
-    ) -> None:
+    def _draw_meta(self, canvas: np.ndarray, frame_index: int, processing_ms: float, track_count: int) -> None:
         fps_est = 1000.0 / processing_ms if processing_ms > 0 else 0.0
-        text = (
-            f"Frame:{frame_index}  {processing_ms:.1f}ms  "
-            f"~{fps_est:.0f}fps  tracks:{track_count}"
-        )
-        cv2.putText(
-            canvas,
-            text,
-            (8, 24),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (200, 200, 200),
-            1,
-            cv2.LINE_AA,
-        )
+        text = f"Frame:{frame_index} {processing_ms:.1f}ms ~{fps_est:.0f}fps tracks:{track_count}"
+        cv2.putText(canvas, text, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1, cv2.LINE_AA)

@@ -12,7 +12,7 @@ Responsibilities:
   - Handle source exhaustion (EOF on video files) and reconnection on RTSP loss
 
 STRICT: This file does NOT import or modify any ai/ module internals.
-        It only calls ai.pipeline.AIPipeline.process_frame().
+        It only calls ai.pipeline.Pipeline.process_frame().
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ from typing import Optional
 import cv2
 import redis.asyncio as aioredis
 
-# ── AI pipeline (completed, untouched) ──────────────────────────────────────
-from ai.pipeline import AIPipeline, PipelineResult
+# ── AI pipeline (updated to match Pipeline class name) ──────────────────────
+from backend.ai.pipeline import Pipeline, PipelineResult
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,10 @@ def alert_channel(camera_id: int | str) -> str:
     return f"camera:{camera_id}:alerts"
 
 
+def event_channel(camera_id: int | str) -> str:
+    return f"camera:{camera_id}:events"
+
+
 # ── Payload builders ─────────────────────────────────────────────────────────
 
 def _encode_frame(frame) -> str:
@@ -63,18 +67,9 @@ def _encode_frame(frame) -> str:
 def _build_frame_payload(camera_id: int | str, result: PipelineResult) -> str:
     """
     Build the JSON string that the WebSocket manager will forward to browsers.
-
-    Schema (matches api-reference.md §8.1 + §9.1):
-    {
-        "camera_id": int,
-        "timestamp": str (ISO-8601),
-        "frame": str (base64 JPEG),
-        "occupancy": int,
-        "tracks": [{"track_id": int, "bbox": [x,y,w,h]}, ...]
-    }
     """
     tracks = [
-        {"track_id": t.id, "bbox": list(t.bbox)}
+        {"track_id": t.track_id, "bbox": list(t.bbox)}
         for t in (result.tracks or [])
     ]
 
@@ -85,6 +80,7 @@ def _build_frame_payload(camera_id: int | str, result: PipelineResult) -> str:
         "occupancy": len(tracks),
         "tracks": tracks,
         "events": _serialize_events(result.events),
+        "business_events": result.business_events,
     }
     return json.dumps(payload)
 
@@ -96,6 +92,16 @@ def _build_alert_payload(camera_id: int | str, event: dict) -> str:
         "type": event.get("type", "unknown"),
         "severity": event.get("severity", "low"),
         "message": event.get("message", ""),
+        "timestamp": _utcnow(),
+    })
+
+
+def _build_event_payload(camera_id: int | str, event: dict) -> str:
+    """Build a general business event JSON string."""
+    return json.dumps({
+        "camera_id": camera_id,
+        "type": event.get("type", "unknown"),
+        "message": event.get("message", f"Event: {event.get('type')}"),
         "timestamp": _utcnow(),
     })
 
@@ -143,25 +149,22 @@ async def run_camera_worker(
     camera_id: int | str,
     source: str | int,
     redis_url: str,
-    pipeline: Optional[AIPipeline] = None,
+    pipeline: Optional[Pipeline] = None,
     stop_event: Optional[asyncio.Event] = None,
 ) -> None:
     """
     Entry-point coroutine for a single camera.
-
-    Parameters
-    ----------
-    camera_id  : unique camera identifier (matches DB Camera.id)
-    source     : video file path, RTSP URL, or webcam index (int)
-    redis_url  : e.g. "redis://localhost:6379/0"
-    pipeline   : pre-constructed AIPipeline; constructed here if None
-    stop_event : set this to gracefully shut down the worker
     """
     if stop_event is None:
         stop_event = asyncio.Event()
 
     if pipeline is None:
-        pipeline = AIPipeline()
+        from backend.app.config import settings
+        pipeline = Pipeline(
+            model_path=settings.MODEL_PATH,
+            weapon_model_path=settings.WEAPON_MODEL_PATH,
+            weapon_imgsz=settings.WEAPON_IMGSZ
+        )
 
     redis_client: aioredis.Redis = await aioredis.from_url(
         redis_url, encoding="utf-8", decode_responses=True
@@ -169,6 +172,7 @@ async def run_camera_worker(
 
     frame_ch = camera_channel(camera_id)
     alert_ch = alert_channel(camera_id)
+    event_ch = event_channel(camera_id)
 
     logger.info("[CameraWorker %s] Starting — source=%r", camera_id, source)
 
@@ -190,6 +194,7 @@ async def run_camera_worker(
                 redis_client=redis_client,
                 frame_ch=frame_ch,
                 alert_ch=alert_ch,
+                event_ch=event_ch,
                 stop_event=stop_event,
             )
 
@@ -233,45 +238,41 @@ async def run_camera_worker(
 async def _capture_loop(
     camera_id,
     cap: cv2.VideoCapture,
-    pipeline: AIPipeline,
+    pipeline: Pipeline,
     redis_client: aioredis.Redis,
     frame_ch: str,
     alert_ch: str,
+    event_ch: str,
     stop_event: asyncio.Event,
 ) -> None:
-    """Inner frame-reading loop. Exits when the source is exhausted or stop_event is set."""
+    """Inner frame-reading loop."""
     loop = asyncio.get_event_loop()
     last_publish_time = 0.0
 
     while not stop_event.is_set():
-        # ── 1. Read frame (blocking I/O → executor) ──────────────────────────
         ret, frame = await loop.run_in_executor(None, cap.read)
 
         if not ret:
-            # EOF on file, or transient RTSP drop
             logger.debug("[CameraWorker %s] cap.read() returned False — EOF or drop.", camera_id)
             break
 
-        # ── 2. Throttle to MAX_FPS ────────────────────────────────────────────
         now = time.monotonic()
         elapsed = now - last_publish_time
         if elapsed < FRAME_INTERVAL:
-            # Drop this frame; sleep the remainder so we stay near target FPS
             await asyncio.sleep(FRAME_INTERVAL - elapsed)
             continue
 
-        # ── 3. Run AI pipeline (CPU-bound → executor) ─────────────────────────
         try:
             result: PipelineResult = await loop.run_in_executor(
                 None, pipeline.process_frame, frame
             )
         except Exception as exc:
-            logger.warning("[CameraWorker %s] Pipeline error (frame skipped): %s", camera_id, exc)
+            logger.warning("[CameraWorker %s] Pipeline error: %s", camera_id, exc)
             continue
 
         last_publish_time = time.monotonic()
 
-        # ── 4. Publish annotated frame payload to Redis ───────────────────────
+        # ── 4. Publish annotated frame ───────────────────────────────────────
         try:
             frame_payload = await loop.run_in_executor(
                 None, _build_frame_payload, camera_id, result
@@ -280,19 +281,33 @@ async def _capture_loop(
         except Exception as exc:
             logger.warning("[CameraWorker %s] Redis publish (frame) failed: %s", camera_id, exc)
 
-        # ── 5. Publish alert events to separate Redis channel ─────────────────
+        # ── 5. Publish events & alerts ───────────────────────────────────────
+        all_alerts = []
+        all_events = []
+        
+        for evt in result.business_events:
+            if "alert" in evt.get("type", "").lower() or "overcrowding" in evt.get("type", "").lower():
+                all_alerts.append(evt)
+            else:
+                all_events.append(evt)
+        
         for event in (result.events or []):
-            event_dict = (
-                asdict(event) if hasattr(event, "__dataclass_fields__") else dict(event)
-            )
+            event_dict = asdict(event) if hasattr(event, "__dataclass_fields__") else dict(event)
             if event_dict.get("is_alert"):
-                try:
-                    alert_payload = _build_alert_payload(camera_id, event_dict)
-                    await redis_client.publish(alert_ch, alert_payload)
-                except Exception as exc:
-                    logger.warning(
-                        "[CameraWorker %s] Redis publish (alert) failed: %s", camera_id, exc
-                    )
+                all_alerts.append(event_dict)
 
-        # ── 6. Yield control to event loop ────────────────────────────────────
+        for alert in all_alerts:
+            try:
+                alert_payload = _build_alert_payload(camera_id, alert)
+                await redis_client.publish(alert_ch, alert_payload)
+            except Exception as exc:
+                logger.warning("[CameraWorker %s] Redis publish (alert) failed: %s", camera_id, exc)
+        
+        for biz_event in all_events:
+            try:
+                event_payload = _build_event_payload(camera_id, biz_event)
+                await redis_client.publish(event_ch, event_payload)
+            except Exception as exc:
+                logger.warning("[CameraWorker %s] Redis publish (event) failed: %s", camera_id, exc)
+
         await asyncio.sleep(0)

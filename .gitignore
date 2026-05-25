@@ -62,3 +62,5 @@ weapon-detection-1/
 
 # Allow tracking of python scripts in dataset
 !dataset/*.py
+
+weapon_dataset.zip
