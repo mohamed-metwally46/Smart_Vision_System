@@ -19,8 +19,11 @@ from .person_detector import Detection
 
 logger = logging.getLogger(__name__)
 
-# Based on weapon-detection-1/data.yaml: 0: junk_a, 1: junk_b, 2: weapon
-WEAPON_CLASS_ID: int = 2
+# Based on inspection of the trained weights (models/weapon_final.pt):
+# 0: '-' (tight bounding box around the weapon)
+# 1: 'undefined' (person holding the weapon)
+# 2: 'weapon detection - v7 personNweaponGreyGenX2V2' (full person body)
+WEAPON_CLASS_ID: int = 0
 
 # Detections below this threshold are discarded
 CONFIDENCE_THRESHOLD: float = 0.5
@@ -33,9 +36,9 @@ class WeaponDetector:
 
     def __init__(
         self,
-        model_path: str | Path = "models/yolov8n.pt",
+        model_path: str | Path = "models/weapon_final.pt",
         confidence_threshold: float = CONFIDENCE_THRESHOLD,
-        imgsz: int = 416,
+        imgsz: int = 640,
     ) -> None:
         """
         Parameters

@@ -35,7 +35,7 @@ def load_detector():
         st.stop()
     return WeaponDetector(
         model_path=model_path,
-        confidence_threshold=0.5,
+        confidence_threshold=0.15,
         imgsz=416
     )
 
