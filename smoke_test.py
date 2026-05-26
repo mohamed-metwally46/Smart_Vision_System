@@ -108,6 +108,7 @@ def main() -> None:
     # ---- Step 2: build pipeline -------------------------------------------
     pipeline = Pipeline(
         model_path=model_path,
+        weapon_model_path="models/weapon_final.pt",
         confidence_threshold=0.4,
         frame_rate=int(fps),
     )

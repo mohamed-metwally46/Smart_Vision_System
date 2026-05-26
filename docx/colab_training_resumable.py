@@ -55,17 +55,24 @@ else:
     resume_flag = False
 
 # 7. Start/Resume High-Performance Training
+# ---------------------------------------------------------
+# Hyperparameter Justifications:
+#   imgsz=640:   Standard high resolution for accurate object detection (utilizing T4's 16GB VRAM).
+#   batch=32:    Optimized maximum throughput for the Tesla T4 architecture.
+#   patience=15: Early stopping anti-overfitting measure; halts if validation mAP50 stops improving.
+#   close_mosaic: Final sharpening technique applied in the last 10 epochs.
+# ---------------------------------------------------------
 model.train(
     data=yaml_file,
     epochs=50,
-    imgsz=640,         # High resolution
-    batch=32,          # Optimized for T4 GPU (16GB VRAM)
-    device=0,          # Force GPU
-    project=drive_path, # SAVE EVERYTHING TO GOOGLE DRIVE
+    imgsz=640,          
+    batch=32,           
+    device=0,          
+    project=drive_path, 
     name='svs_weapon_detection',
-    resume=resume_flag, # Automatically picks up from the last epoch
-    patience=15,       # Anti-overfitting
-    close_mosaic=10    # Final sharpening
+    resume=resume_flag, 
+    patience=15,       
+    close_mosaic=10    
 )
 
 # After training finishes, your BEST model will be in your Google Drive at:

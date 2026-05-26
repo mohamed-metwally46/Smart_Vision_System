@@ -78,6 +78,10 @@ class WeaponDetector:
         except Exception as exc:
             logger.error("Weapon YOLO inference failed: %s", exc, exc_info=True)
             return []
+        finally:
+            if is_cuda:
+                import torch
+                torch.cuda.empty_cache()
 
         return self._parse_results(results)
 
