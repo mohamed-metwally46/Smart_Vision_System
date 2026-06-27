@@ -33,8 +33,11 @@ from typing import Optional
 
 import cv2
 
-# ── AI pipeline (completed, untouched) ───────────────────────────────────────
+# ── AI pipeline + business-logic analyzers ───────────────────────────────────
 from ai.pipeline import AIPipeline, PipelineResult
+from ai.business_logic.zone_monitor import ZoneMonitor, ZoneConfig
+from ai.business_logic.behavior_analyzer import BehaviorAnalyzer
+from ai.business_logic.alert_engine import AlertEngine
 
 # ── Centralised Redis layer ───────────────────────────────────────────────────
 from backend.app.core.redis import publish_json
@@ -82,6 +85,53 @@ def _is_file(source: str | int) -> bool:
     return isinstance(source, str) and not source.lower().startswith("rtsp://")
 
 
+# ── Per-camera analyzer configuration (loaded from the DB) ────────────────────
+
+async def _load_zone_configs(camera_id: int | str) -> list[ZoneConfig]:
+    """Load active polygon zones for this camera from PostgreSQL."""
+    from sqlalchemy import select
+    from backend.app.db.session import AsyncSessionLocal
+    from backend.app.models.zone import Zone
+
+    configs: list[ZoneConfig] = []
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(select(Zone).where(Zone.camera_id == int(camera_id)))
+        ).scalars().all()
+
+    for z in rows:
+        if not getattr(z, "is_active", True):
+            continue
+        polygon = [tuple(pt) for pt in (z.polygon or [])]
+        if len(polygon) < 3:
+            logger.warning("[CameraWorker %s] Zone %s skipped — <3 points.", camera_id, z.id)
+            continue
+        configs.append(
+            ZoneConfig(zone_id=z.id, name=z.name, polygon=polygon, threshold=z.threshold)
+        )
+    return configs
+
+
+async def _configure_analyzers(pipeline: AIPipeline, camera_id: int | str) -> None:
+    """
+    Register the per-camera business-logic analyzers on the pipeline.
+
+    The EntryExitCounter is set lazily on the first frame (it needs the frame
+    dimensions to place a default line). ZoneMonitor is registered only if the
+    camera has zones configured; BehaviorAnalyzer (loitering) is always on.
+    """
+    try:
+        zone_configs = await _load_zone_configs(camera_id)
+        if zone_configs:
+            pipeline.register_analyzer(ZoneMonitor(zone_configs))
+            logger.info("[CameraWorker %s] ZoneMonitor: %d zone(s).", camera_id, len(zone_configs))
+    except Exception as exc:
+        logger.warning("[CameraWorker %s] Could not load zones: %s", camera_id, exc)
+
+    pipeline.register_analyzer(BehaviorAnalyzer())
+    logger.info("[CameraWorker %s] Analyzers configured.", camera_id)
+
+
 # ── Main coroutine ────────────────────────────────────────────────────────────
 
 async def run_camera_worker(
@@ -117,6 +167,10 @@ async def run_camera_worker(
             redis_url, encoding="utf-8", decode_responses=True, max_connections=10
         )
 
+    # Register analyzers + build the alert engine for this camera. (C5)
+    await _configure_analyzers(pipeline, camera_id)
+    alert_engine = AlertEngine(camera_id=int(camera_id))
+
     frame_ch = camera_channel(camera_id)
     alert_ch = alert_channel(camera_id)
 
@@ -137,6 +191,7 @@ async def run_camera_worker(
                 camera_id=camera_id,
                 cap=cap,
                 pipeline=pipeline,
+                alert_engine=alert_engine,
                 frame_ch=frame_ch,
                 alert_ch=alert_ch,
                 stop_event=stop_event,
@@ -179,6 +234,7 @@ async def _capture_loop(
     camera_id: int | str,
     cap: cv2.VideoCapture,
     pipeline: AIPipeline,
+    alert_engine: AlertEngine,
     frame_ch: str,
     alert_ch: str,
     stop_event: asyncio.Event,
@@ -193,6 +249,13 @@ async def _capture_loop(
         if not ret:
             logger.debug("[CameraWorker %s] EOF or frame drop.", camera_id)
             break
+
+        # 1b. Establish a default counting line once we know the frame size. (C5)
+        #     Operators can later override this; without it the EntryExitCounter
+        #     is never registered and no crossing events are produced.
+        if pipeline.get_counter() is None:
+            h, w = frame.shape[:2]
+            pipeline.set_counting_line((0, h // 2), (w, h // 2))
 
         # 2. FPS throttle
         now = time.monotonic()
@@ -225,22 +288,24 @@ async def _capture_loop(
                 "[CameraWorker %s] Redis publish (frame) failed: %s", camera_id, exc
             )
 
-        # 5. Publish alert events — check severity, preserve full metadata
-        for event in (result.events or []):
-            try:
-                event_dict = event_to_dict(event)
-            except Exception:
-                continue
-
-            if event_dict.get("severity", "") in ALERT_SEVERITIES:
+        # 5. Turn business events into structured alerts via the AlertEngine,
+        #    then publish each to the alert channel. Per-frame occupancy
+        #    snapshots ("zone_occupancy") are skipped to avoid flooding. (C4/C5)
+        try:
+            alert_engine.process_business_events(result.business_events or [])
+            for alert in alert_engine.flush_alerts():
+                if alert.alert_type.value == "zone_occupancy":
+                    continue
                 try:
-                    alert_payload = serialize_alert_payload(camera_id, event_dict)
+                    alert_payload = serialize_alert_payload(camera_id, alert.to_dict())
                     await publish_json(alert_ch, alert_payload)
                 except Exception as exc:
                     logger.warning(
                         "[CameraWorker %s] Redis publish (alert) failed: %s",
                         camera_id, exc,
                     )
+        except Exception as exc:
+            logger.warning("[CameraWorker %s] AlertEngine error: %s", camera_id, exc)
 
         # 6. Yield control
         await asyncio.sleep(0)
