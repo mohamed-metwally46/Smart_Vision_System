@@ -24,6 +24,7 @@ from backend.app.config import settings
 from backend.app.websocket.manager import manager as ws_manager
 
 # ── REST routers ──────────────────────────────────────────────────────────────
+from backend.app.api.v1.auth import router as auth_router
 from backend.app.api.v1.cameras import router as cameras_router
 from backend.app.api.v1.alerts import router as alerts_router
 from backend.app.api.v1.analytics import router as analytics_router
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
 
     # ── REST routers ──────────────────────────────────────────────────────────
     api_prefix = "/api/v1"
+    app.include_router(auth_router,       prefix=api_prefix,                       tags=["auth"])
     app.include_router(cameras_router,   prefix=f"{api_prefix}/cameras",          tags=["cameras"])
     app.include_router(alerts_router,    prefix=f"{api_prefix}/alerts",            tags=["alerts"])
     app.include_router(analytics_router, prefix=f"{api_prefix}/analytics",         tags=["analytics"])
