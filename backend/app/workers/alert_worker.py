@@ -107,10 +107,19 @@ def _extract_camera_id(payload: dict, channel: str) -> Optional[int]:
 
 def _parse_timestamp(payload: dict) -> datetime:
     """
-    Parse ISO-8601 timestamp from payload or return now(UTC) as fallback.
+    Parse a timestamp from the payload, or return now(UTC) as fallback.
+
+    Accepts both ISO-8601 strings (frame/alert serializers) and Unix epoch
+    floats (the analyzers emit time.time()). Without the float branch every
+    persist would raise TypeError and roll back. (C4)
     """
     raw_ts = payload.get("timestamp")
-    if raw_ts:
+    if isinstance(raw_ts, (int, float)):
+        try:
+            return datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            pass
+    elif isinstance(raw_ts, str) and raw_ts:
         try:
             return datetime.fromisoformat(raw_ts)
         except ValueError:
@@ -230,18 +239,14 @@ async def _process_payload(channel: str, raw: str) -> None:
     if camera_id is None:
         return
 
-    # ── Alert channel: single event payload ────────────────────────────────────
+    # ── Alert channel: structured AlertEngine output → Alert rows only ─────────
+    #    (Events are persisted from the frame channel to avoid duplicates.) (C4)
     if channel.endswith(":alerts"):
-        alert_type = payload.get("type", "")
-        severity   = payload.get("severity", "")
-
+        severity = payload.get("severity", "")
         if severity in PERSIST_SEVERITIES:
             await _persist_alert(camera_id, payload)
 
-        if alert_type in EVENT_TYPES:
-            await _persist_event(camera_id, payload)
-
-    # ── Frame channel: extract entry/exit events from events[] array ───────────
+    # ── Frame channel: business events[] array → Event rows only ───────────────
     elif channel.endswith(":frames"):
         events = payload.get("events", [])
         if not isinstance(events, list):
@@ -249,14 +254,15 @@ async def _process_payload(channel: str, raw: str) -> None:
         for event in events:
             if not isinstance(event, dict):
                 continue
-            ev_type  = event.get("type", "")
-            severity = event.get("severity", "")
-            # Persist entry/exit as Event rows
-            if ev_type in EVENT_TYPES:
+            ev_type = event.get("type", "")
+            if ev_type == "crossing_event":
+                # Map crossing direction → entry/exit so /analytics/summary
+                # (which counts entry_event/exit_event) is meaningful.
+                direction = str(event.get("direction", "")).upper()
+                event = {**event, "type": "entry_event" if direction == "IN" else "exit_event"}
                 await _persist_event(camera_id, event)
-            # If the embedded event also carries a severity, persist as Alert
-            if severity in PERSIST_SEVERITIES:
-                await _persist_alert(camera_id, event)
+            elif ev_type in EVENT_TYPES:
+                await _persist_event(camera_id, event)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
