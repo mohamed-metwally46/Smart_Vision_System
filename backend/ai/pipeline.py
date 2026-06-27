@@ -274,3 +274,11 @@ def _infer_direction(start: tuple[int, int], end: tuple[int, int]) -> str:
     # Vertical-ish line
     else:
         return "right"
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compatible alias
+# ---------------------------------------------------------------------------
+# The worker/celery modules historically import ``AIPipeline``; the canonical
+# class is ``Pipeline``. Expose an alias so those imports resolve. (C1)
+AIPipeline = Pipeline

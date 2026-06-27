@@ -114,11 +114,16 @@ def serialize_internal_frame(camera_id: int | str, result) -> dict:
 
     Note: this payload does NOT include tracks or occupancy — those are
     added in the WebSocket outbound payload (§8.1) below.
+
+    `events` carries the analyzer output (result.business_events): these are
+    the dicts that actually carry `type`/`severity` (crossing/zone/loitering).
+    The track-lifecycle objects in result.events have no such fields and are
+    not what downstream consumers (dashboard, alert_worker) expect. (C4)
     """
     return {
         "camera_id": camera_id,
         "frame": encode_frame_base64(result.annotated_frame),
-        "events": [event_to_dict(e) for e in (result.events or [])],
+        "events": [event_to_dict(e) for e in (result.business_events or [])],
         "timestamp": _utcnow(),
     }
 
