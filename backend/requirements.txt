@@ -31,7 +31,7 @@ pydantic-settings==2.7.*
 
 # ── Authentication ─────────────────────────────────────────────────────────────
 python-jose[cryptography]==3.3.*   # JWT encoding / decoding
-# Add pin below it:
+passlib[bcrypt]==1.7.*    # password hashing context
 bcrypt==4.0.1             # password hashing (bcrypt)
 
 # ── Utilities ──────────────────────────────────────────────────────────────────
