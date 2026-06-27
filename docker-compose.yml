@@ -133,11 +133,11 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+    # Run the alert persistence worker directly as a long-lived asyncio process.
+    # (run_alert_worker is a coroutine with no Celery task, so a Celery worker
+    #  on -Q alerts had nothing to consume.) (C6)
     command: >
-      celery -A backend.app.workers.celery_app worker
-      --loglevel=info
-      --concurrency=1
-      -Q alerts
+      python -c "import asyncio; from backend.app.workers.alert_worker import run_alert_worker; asyncio.run(run_alert_worker())"
 
   # ── Frontend (Next.js) — Phase 3 ──────────────────────────────────────────────
   frontend:

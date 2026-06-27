@@ -96,11 +96,9 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+    # Alert persistence worker runs directly as a long-lived asyncio process. (C6)
     command: >
-      celery -A backend.app.workers.celery_app worker
-      --loglevel=warning
-      --concurrency=1
-      -Q alerts
+      python -c "import asyncio; from backend.app.workers.alert_worker import run_alert_worker; asyncio.run(run_alert_worker())"
 
   nginx:
     image: nginx:alpine

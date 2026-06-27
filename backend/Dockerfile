@@ -30,8 +30,23 @@ RUN pip install --no-cache-dir -r /backend/requirements.txt
 # ── Application code ───────────────────────────────────────────────────────────
 COPY . /backend/
 
+# Alembic config at filesystem root so `alembic upgrade head` works from the
+# default WORKDIR (/) with no -c flag. (C8)
+COPY alembic.ini /alembic.ini
+
 # ── Pre-download YOLOv8n weights ──────────────────────────────────────────────
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')" || true
+
+# ── Import path ──────────────────────────────────────────────────────────────
+# Two roots are required:
+#   /backend  → makes the top-level `ai.*` namespace package importable
+#               (used by the workers: `from ai.pipeline import ...`)
+#   /         → makes the `backend.*` package importable
+#               (everything imports `from backend.app...`; the `backend`
+#                package dir is /backend, whose parent is /)
+# Both are needed for Celery (-A backend.app.workers.celery_app) and Alembic
+# (env.py imports backend.app.*), which do not add CWD to sys.path. (C3)
+ENV PYTHONPATH=/backend:/
 
 # ── Port ───────────────────────────────────────────────────────────────────────
 EXPOSE 3000
