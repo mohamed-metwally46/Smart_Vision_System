@@ -1,6 +1,8 @@
 """models/zone.py"""
 from __future__ import annotations
-from sqlalchemy import Integer, String
+from datetime import datetime, timezone
+from typing import List
+from sqlalchemy import Boolean, DateTime, Integer, String, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 from backend.app.db.session import Base
 
@@ -9,5 +11,11 @@ class Zone(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     camera_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Polygon vertices as a JSON list of [x, y] pairs (matches schemas/zone.py). (C7)
+    polygon: Mapped[List] = mapped_column(JSON, nullable=False, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     current_occupancy: Mapped[int] = mapped_column(Integer, default=0)
     threshold: Mapped[int] = mapped_column(Integer, default=5)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
