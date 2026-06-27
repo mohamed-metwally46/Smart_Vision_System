@@ -27,6 +27,8 @@ class Settings(BaseSettings):
 
     # ── AI model ──────────────────────────────────────────────────────────────
     MODEL_PATH: str = "models/yolov8n.pt"
+    WEAPON_MODEL_PATH: str = "models/runs/weapon_detection_v1/weights/best.pt"
+    WEAPON_IMGSZ: int = 416
 
     # ── Object storage ────────────────────────────────────────────────────────
     MINIO_ENDPOINT: str = "localhost:9000"

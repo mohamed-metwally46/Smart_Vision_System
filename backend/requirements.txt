@@ -21,7 +21,7 @@ kombu==5.4.*
 
 # ── AI / Computer Vision ───────────────────────────────────────────────────────
 ultralytics==8.3.*          # YOLOv8 — includes PyTorch CPU by default
-opencv-python==4.10.*
+opencv-python-headless==4.10.*
 supervision==0.25.*         # ByteTrack wrapper + annotation utilities
 numpy==2.1.*                # Pre-built wheels available for Python 3.13
 

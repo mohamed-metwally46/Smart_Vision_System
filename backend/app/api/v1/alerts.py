@@ -3,35 +3,17 @@ api/v1/alerts.py  — matches api-reference.md §4
 """
 from __future__ import annotations
 
-from datetime import datetime
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.dependencies import get_db
+from backend.app.db.session import get_db
+from backend.app.schemas.alert import AlertOut, PaginatedAlerts
+from backend.app.models.alert import Alert
 
 router = APIRouter()
-
-
-class AlertOut(BaseModel):
-    id: int
-    camera_id: int
-    type: str
-    severity: str
-    message: str
-    timestamp: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class PaginatedAlerts(BaseModel):
-    items: List[AlertOut]
-    page: int
-    limit: int
-    total: int
 
 
 @router.get("/", response_model=PaginatedAlerts)
@@ -42,8 +24,6 @@ async def list_alerts(
     camera_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
-    from backend.app.models.alert import Alert
-
     query = select(Alert).order_by(Alert.timestamp.desc())
     if severity:
         query = query.where(Alert.severity == severity)
@@ -62,7 +42,6 @@ async def list_alerts(
 
 @router.get("/{alert_id}", response_model=AlertOut)
 async def get_alert(alert_id: int, db: AsyncSession = Depends(get_db)):
-    from backend.app.models.alert import Alert
     alert = await db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")

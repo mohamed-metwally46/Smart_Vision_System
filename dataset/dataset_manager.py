@@ -76,7 +76,13 @@ class DatasetManager:
 
 if __name__ == "__main__":
     # Example usage for graduation project
-    API_KEY = "fFXhCaoFIFWDvSJAkMWl" # Provided in original script
+    # SECURITY: Never hardcode API keys in production or version control.
+    API_KEY = os.getenv("ROBOFLOW_API_KEY")
+    if not API_KEY:
+        print("Error: ROBOFLOW_API_KEY environment variable is missing.")
+        print("Please set it before running this script.")
+        exit(1)
+
     manager = DatasetManager(
         api_key=API_KEY,
         workspace="ir-uz1qh",
