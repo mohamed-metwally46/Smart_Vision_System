@@ -183,7 +183,7 @@ def dispatch_camera_worker(
             "source": source,
             "redis_url": redis_url,
         },
-        queue=f"camera.{camera_id}",   # per-camera isolated queue
+        queue="cameras",   # consumed by the worker pool started with -Q cameras (C2)
     )
     return result.id
 
