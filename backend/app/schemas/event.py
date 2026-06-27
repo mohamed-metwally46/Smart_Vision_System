@@ -9,7 +9,7 @@ Imported by:  api/v1/logs.py
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -32,6 +32,14 @@ class EventLogOut(BaseModel):
     timestamp: datetime
 
     model_config = {"from_attributes": True}
+
+
+class PaginatedEvents(BaseModel):
+    """Paginated list response for event logs."""
+    items: List[EventLogOut]
+    page: int
+    limit: int
+    total: int
 
 
 class EventFilterParams(BaseModel):
