@@ -2,75 +2,70 @@
 
 # ── Environment / secrets ─────────────────────────────────────────────────────
 .env
-*.env.local
+.env.local
+.env.*.local
+frontend/.env.local
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
-*.pyo
 *.pyd
-.Python
 *.egg-info/
+*.egg
 dist/
 build/
 .eggs/
-*.egg
 venv/
 .venv/
-env/
-.env/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
 
-# ── AI model weights (large binary files — store separately or in DVC) ────────
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+npm-debug.log*
+
+# ── AI model weights (large binaries — store separately or in DVC) ────────────
 models/*.pt
 models/*.pth
 models/*.onnx
-
-# Keep the README
 !models/README.md
-
-# Allow tracking of python scripts in models
 !models/*.py
 
-# ── Heatmaps (generated at runtime) ──────────────────────────────────────────
+# ── Generated / runtime data ──────────────────────────────────────────────────
 backend/static/heatmaps/
-
-# ── Datasets / Generated Data ────────────────────────────────────────────────
 data/
 datasets/
-*.csv
 *.db
 *.sqlite3
-
-# Ignore Large AI Datasets
 weapon-detection-1/
-
-# Allow tracking of python scripts in dataset
 !dataset/*.py
-
-# ── Alembic generated migrations (commit these to git) ───────────────────────
-# backend/app/db/migrations/versions/*.py  ← DO commit these
-
-# ── Docker ────────────────────────────────────────────────────────────────────
-.docker/
 
 # ── Node / Next.js ────────────────────────────────────────────────────────────
 node_modules/
 .next/
 out/
-frontend/.env.local
 
-# ── Testing ───────────────────────────────────────────────────────────────────
-.pytest_cache/
-.coverage
-htmlcov/
-*.xml
+# ── Docker ────────────────────────────────────────────────────────────────────
+.docker/
 
-# ── IDE ───────────────────────────────────────────────────────────────────────
+# ── IDE / AI assistants ───────────────────────────────────────────────────────
 .vscode/
 .idea/
+.claude/
+.gemini/
 *.swp
 *.swo
-.DS_Store
 
-# ── Videos ────────────────────────────────────────────────────────────────────
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Media ─────────────────────────────────────────────────────────────────────
 *.mp4
+*.avi
+*.mov
