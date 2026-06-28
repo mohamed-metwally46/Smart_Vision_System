@@ -76,7 +76,7 @@ def _build_frame_payload(camera_id: int | str, result: PipelineResult) -> str:
         "events": _serialize_events(result.events),
         "business_events": result.business_events,
     }
-    return json.dumps(payload)
+    return json.dumps(payload, default=_json_default)
 
 
 def _build_alert_payload(camera_id: int | str, event: dict) -> str:
@@ -98,13 +98,23 @@ def _build_event_payload(camera_id: int | str, event: dict) -> str:
     })
 
 
+def _json_default(obj):
+    from enum import Enum
+    if isinstance(obj, Enum):
+        return obj.value
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def _serialize_events(events) -> list:
     if not events:
         return []
     result = []
     for e in events:
         try:
-            result.append(asdict(e) if hasattr(e, "__dataclass_fields__") else dict(e))
+            d = asdict(e) if hasattr(e, "__dataclass_fields__") else dict(e)
+            # Normalize enum values to their primitive representation
+            import json
+            result.append(json.loads(json.dumps(d, default=_json_default)))
         except Exception:
             result.append(str(e))
     return result

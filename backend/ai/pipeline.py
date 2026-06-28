@@ -124,11 +124,18 @@ class Pipeline:
             confidence_threshold=confidence_threshold,
             imgsz=imgsz,
         )
-        self._weapon_detector = WeaponDetector(
-            model_path=weapon_model_path,
-            confidence_threshold=confidence_threshold,
-            imgsz=weapon_imgsz,
-        )
+        try:
+            self._weapon_detector: Optional[WeaponDetector] = WeaponDetector(
+                model_path=weapon_model_path,
+                confidence_threshold=confidence_threshold,
+                imgsz=weapon_imgsz,
+            )
+        except FileNotFoundError:
+            logger.warning(
+                "Weapon model not found at '%s' — weapon detection disabled.",
+                weapon_model_path,
+            )
+            self._weapon_detector = None
         self._tracker = ByteTrackWrapper(
             frame_rate=frame_rate,
             track_buffer=max_frames_lost,
@@ -170,21 +177,18 @@ class Pipeline:
         # ---- Stage 1: Detection ----------------------------------------
         try:
             detections = self._detector.detect(frame)
-            weapon_detections = self._weapon_detector.detect(frame)
-
-            # Combine all detections for tracking layer
+            if self._weapon_detector is not None:
+                weapon_detections = self._weapon_detector.detect(frame)
+                for wd in weapon_detections:
+                    business_events.append({
+                        "type": "weapon_alert",
+                        "severity": "critical",
+                        "confidence": wd.confidence,
+                        "bbox": wd.bbox,
+                        "timestamp": time.time(),
+                        "message": "!!! WEAPON DETECTED !!!",
+                    })
             all_detections = detections + weapon_detections
-
-            # Generate weapon alerts immediately
-            for wd in weapon_detections:
-                business_events.append({
-                    "type": "weapon_alert",
-                    "severity": "critical",
-                    "confidence": wd.confidence,
-                    "bbox": wd.bbox,
-                    "timestamp": time.time(),
-                    "message": "!!! WEAPON DETECTED !!!"
-                })
         except Exception as exc:
             logger.error("[Frame %d] Detection failed: %s", self._frame_index, exc, exc_info=True)
 
