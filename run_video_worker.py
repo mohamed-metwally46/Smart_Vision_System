@@ -2,10 +2,12 @@
 run_video_worker.py
 ───────────────────
 Standalone runner that registers a video file as a camera in the DB and
-starts the AI camera worker directly — no Celery required.
+starts the full pipeline locally — no Celery required:
+  - camera_worker  : runs AI inference and publishes frames to Redis
+  - alert_worker   : subscribes to Redis, persists entry/exit events to DB
 
-Frames are published to Redis → picked up by the FastAPI WebSocket manager
-→ streamed to the frontend at http://localhost:3000/monitor
+Frames are published to Redis → FastAPI WebSocket manager → frontend.
+Entry/exit counts are persisted to DB → /api/v1/analytics/summary → dashboard.
 
 Usage:
     python run_video_worker.py
@@ -19,7 +21,6 @@ import logging
 import sys
 from pathlib import Path
 
-# ── Bootstrap sys.path so backend.* and ai.* imports resolve ─────────────────
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
@@ -37,6 +38,7 @@ async def main() -> None:
     from backend.app.db.session import AsyncSessionLocal, init_db
     from backend.app.models.camera import Camera
     from backend.app.workers.camera_worker import run_camera_worker
+    from backend.app.workers.alert_worker import run_alert_worker
     from sqlalchemy import select
 
     # ── 1. Init DB ────────────────────────────────────────────────────────────
@@ -74,25 +76,41 @@ async def main() -> None:
     logger.info("")
     logger.info("Open the dashboard now:")
     logger.info("  http://localhost:3000/monitor")
-    logger.info("")
     logger.info("Then click on camera #%d to see the live stream.", camera_id)
+    logger.info("Total In / Total Out update every 10 s from the analytics API.")
     logger.info("Press Ctrl+C to stop.")
     logger.info("=" * 60)
 
-    # ── 3. Run camera worker (loops until video ends or Ctrl+C) ───────────────
     stop = asyncio.Event()
+
+    async def _camera():
+        try:
+            await run_camera_worker(
+                camera_id=camera_id,
+                source=VIDEO_PATH,
+                redis_url=settings.REDIS_URL,
+                stop_event=stop,
+            )
+        finally:
+            stop.set()
+
+    async def _alerts():
+        try:
+            await run_alert_worker(
+                redis_url=settings.REDIS_URL,
+                stop_event=stop,
+            )
+        finally:
+            stop.set()
+
+    # ── 3. Run camera worker + alert worker concurrently ─────────────────────
     try:
-        await run_camera_worker(
-            camera_id=camera_id,
-            source=VIDEO_PATH,
-            redis_url=settings.REDIS_URL,
-            stop_event=stop,
-        )
-    except KeyboardInterrupt:
+        await asyncio.gather(_camera(), _alerts())
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Stopped by user.")
     finally:
         stop.set()
-        logger.info("Worker finished.")
+        logger.info("All workers finished.")
 
 
 if __name__ == "__main__":

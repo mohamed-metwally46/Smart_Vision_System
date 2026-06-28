@@ -169,17 +169,37 @@ async def _load_zone_configs(camera_id: int | str) -> list:
     return configs
 
 
-async def _configure_analyzers(pipeline: Pipeline, camera_id: int | str) -> None:
+async def _configure_analyzers(
+    pipeline: Pipeline,
+    camera_id: int | str,
+    frame_width: int = 1920,
+    frame_height: int = 1080,
+) -> None:
     """
     Register per-camera business-logic analyzers on the pipeline.
 
-    ZoneMonitor is registered only when the camera has zones in the DB.
-    BehaviorAnalyzer (loitering detection) is always registered.
-    Uses pipeline.register_analyzer() which is stable across versions.
+    EntryExitCounter  — always registered; uses a default horizontal midline
+                        scaled to the actual frame dimensions.
+    ZoneMonitor       — registered only when the camera has zones in the DB.
+    BehaviorAnalyzer  — always registered (loitering detection).
     """
+    from backend.ai.business_logic.entry_exit_counter import EntryExitCounter
     from backend.ai.business_logic.zone_monitor import ZoneMonitor
     from backend.ai.business_logic.behavior_analyzer import BehaviorAnalyzer
 
+    # ── Entry/exit counter — horizontal midline ──────────────────────────────
+    counter = EntryExitCounter(
+        line_start=(0, frame_height // 2),
+        line_end=(frame_width, frame_height // 2),
+        in_direction="down",
+    )
+    pipeline.register_analyzer(counter)
+    logger.info(
+        "[CameraWorker %s] EntryExitCounter registered — line y=%d (frame %dx%d).",
+        camera_id, frame_height // 2, frame_width, frame_height,
+    )
+
+    # ── Zone monitor (DB-backed) ─────────────────────────────────────────────
     try:
         zone_configs = await _load_zone_configs(camera_id)
         if zone_configs:
@@ -188,6 +208,7 @@ async def _configure_analyzers(pipeline: Pipeline, camera_id: int | str) -> None
     except Exception as exc:
         logger.warning("[CameraWorker %s] Could not load zones: %s", camera_id, exc)
 
+    # ── Behaviour analyzer ───────────────────────────────────────────────────
     pipeline.register_analyzer(BehaviorAnalyzer())
     logger.info("[CameraWorker %s] BehaviorAnalyzer registered.", camera_id)
 
@@ -213,8 +234,19 @@ async def run_camera_worker(
             weapon_imgsz=settings.WEAPON_IMGSZ,
         )
 
-    # Register zone-based and behavioral analyzers from the DB.
-    await _configure_analyzers(pipeline, camera_id)
+    # Probe frame dimensions so EntryExitCounter midline scales correctly.
+    frame_width, frame_height = 1920, 1080
+    try:
+        cap_probe = _open_capture(source)
+        frame_width = int(cap_probe.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap_probe.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap_probe.release()
+        logger.info("[CameraWorker %s] Frame size probed: %dx%d", camera_id, frame_width, frame_height)
+    except Exception as exc:
+        logger.warning("[CameraWorker %s] Could not probe frame size (%s) — using %dx%d default.", camera_id, exc, frame_width, frame_height)
+
+    # Register analyzers with correct frame dimensions.
+    await _configure_analyzers(pipeline, camera_id, frame_width, frame_height)
 
     redis_client: aioredis.Redis = await aioredis.from_url(
         redis_url, encoding="utf-8", decode_responses=True

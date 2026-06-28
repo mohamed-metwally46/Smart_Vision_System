@@ -246,9 +246,12 @@ async def _process_payload(channel: str, raw: str) -> None:
         if severity in PERSIST_SEVERITIES:
             await _persist_alert(camera_id, payload)
 
-    # ── Frame channel: business events[] array → Event rows only ───────────────
+    # ── Frame channel: read business_events[] → persist entry/exit rows ────────
+    # business_events carries higher-level analyzer output (crossing_event,
+    # loitering, zone_occupancy). The raw "events" key holds TrackEvent
+    # lifecycle objects (TRACK_CREATED etc.) — not what we want here.
     elif channel.endswith(":frames"):
-        events = payload.get("events", [])
+        events = payload.get("business_events", [])
         if not isinstance(events, list):
             return
         for event in events:
@@ -257,10 +260,10 @@ async def _process_payload(channel: str, raw: str) -> None:
             ev_type = event.get("type", "")
             if ev_type == "crossing_event":
                 # Map crossing direction → entry/exit so /analytics/summary
-                # (which counts entry_event/exit_event) is meaningful.
+                # (which counts entry_event/exit_event rows) is meaningful.
                 direction = str(event.get("direction", "")).upper()
-                event = {**event, "type": "entry_event" if direction == "IN" else "exit_event"}
-                await _persist_event(camera_id, event)
+                mapped = {**event, "type": "entry_event" if direction == "IN" else "exit_event"}
+                await _persist_event(camera_id, mapped)
             elif ev_type in EVENT_TYPES:
                 await _persist_event(camera_id, event)
 
