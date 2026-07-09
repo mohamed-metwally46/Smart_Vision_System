@@ -8,7 +8,9 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core.security import get_current_user
 from backend.app.dependencies import get_db
+from backend.app.models.user import User
 
 router = APIRouter()
 
@@ -37,7 +39,10 @@ class ZonesOut(BaseModel):
 
 
 @router.get("/summary", response_model=SummaryOut)
-async def get_summary(db: AsyncSession = Depends(get_db)):
+async def get_summary(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
     from backend.app.models.event import Event
     from backend.app.models.alert import Alert
 
@@ -68,7 +73,7 @@ async def get_summary(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/heatmap/{camera_id}", response_model=HeatmapOut)
-async def get_heatmap(camera_id: int):
+async def get_heatmap(camera_id: int, _: User = Depends(get_current_user)):
     from backend.app.core.storage import HEATMAP_DIR
 
     filepath = HEATMAP_DIR / f"camera_{camera_id}_latest.png"
@@ -82,7 +87,11 @@ async def get_heatmap(camera_id: int):
 
 
 @router.get("/zones/{camera_id}", response_model=ZonesOut)
-async def get_zones(camera_id: int, db: AsyncSession = Depends(get_db)):
+async def get_zones(
+    camera_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
     from backend.app.models.zone import Zone
     from backend.app.core.redis import get_redis_client
     from backend.app.workers.camera_worker import zone_occupancy_key

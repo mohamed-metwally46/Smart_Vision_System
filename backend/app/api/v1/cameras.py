@@ -11,7 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core.security import get_current_user
 from backend.app.db.session import get_db
+from backend.app.models.user import User
 from backend.app.schemas.camera import CameraCreate, CameraOut, CameraUpdate
 from backend.app.models.camera import Camera
 
@@ -19,7 +21,11 @@ router = APIRouter()
 
 
 @router.post("/", response_model=CameraOut, status_code=status.HTTP_201_CREATED)
-async def create_camera(payload: CameraCreate, db: AsyncSession = Depends(get_db)):
+async def create_camera(
+    payload: CameraCreate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
     cam = Camera(**payload.model_dump())
     db.add(cam)
     await db.flush()
@@ -36,13 +42,20 @@ async def create_camera(payload: CameraCreate, db: AsyncSession = Depends(get_db
 
 
 @router.get("/", response_model=List[CameraOut])
-async def list_cameras(db: AsyncSession = Depends(get_db)):
+async def list_cameras(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
     result = await db.execute(select(Camera))
     return result.scalars().all()
 
 
 @router.get("/{camera_id}", response_model=CameraOut)
-async def get_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
+async def get_camera(
+    camera_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
     cam = await db.get(Camera, camera_id)
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -51,7 +64,10 @@ async def get_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.put("/{camera_id}", response_model=CameraOut)
 async def update_camera(
-    camera_id: int, payload: CameraUpdate, db: AsyncSession = Depends(get_db)
+    camera_id: int,
+    payload: CameraUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
 ):
     cam = await db.get(Camera, camera_id)
     if not cam:
@@ -64,7 +80,11 @@ async def update_camera(
 
 
 @router.delete("/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_camera(camera_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_camera(
+    camera_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
     cam = await db.get(Camera, camera_id)
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
