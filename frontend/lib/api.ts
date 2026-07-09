@@ -119,7 +119,7 @@ export const analyticsApi = {
 
 export interface LogsQuery {
   camera_id?: number;
-  type?: EventType;
+  event_type?: EventType;
   page?: number;
   limit?: number;
 }

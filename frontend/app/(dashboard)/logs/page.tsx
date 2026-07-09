@@ -38,7 +38,7 @@ export default function LogsPage() {
       logsApi.list({
         page,
         limit: 50,
-        ...(eventType !== "all" && { type: eventType }),
+        ...(eventType !== "all" && { event_type: eventType }),
         ...(cameraFilter !== "all" && { camera_id: cameraFilter }),
       }),
     refetchInterval: 15_000,
