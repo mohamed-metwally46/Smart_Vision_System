@@ -74,7 +74,7 @@ export interface AnalyticsSummary {
 
 export interface HeatmapData {
   camera_id: number;
-  heatmap_url: string;
+  heatmap_url: string | null;
 }
 
 export interface ZoneStats {

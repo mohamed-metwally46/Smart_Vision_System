@@ -1,8 +1,9 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { analyticsApi } from "@/lib/api";
+import { analyticsApi, camerasApi } from "@/lib/api";
 import { useCamerasStore, useCameraStreamStore } from "@/lib/store";
+import { useCameraStream } from "@/hooks/useCameraStream";
 import OccupancyChart from "@/components/analytics/OccupancyChart";
 import { useEffect, useRef, useState } from "react";
 import type { WSCameraFrame } from "@/types";
@@ -11,8 +12,25 @@ import { Users, TrendingUp, TrendingDown, Activity } from "lucide-react";
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export default function AnalyticsPage() {
+  const setCameras = useCamerasStore((s) => s.setCameras);
   const activeCameraId = useCamerasStore((s) => s.activeCameraId);
   const frame = useCameraStreamStore((s) => s.frame);
+
+  // Analytics has its own live feed — it must not depend on the Monitor page
+  // being mounted (that page owns a separate instance of this same hook, and
+  // the socket closes on unmount, which is why the chart used to never get
+  // data when navigating here directly).
+  const { data: camerasData } = useQuery({
+    queryKey: ["cameras"],
+    queryFn: camerasApi.list,
+    refetchInterval: 30_000,
+  });
+
+  useEffect(() => {
+    if (camerasData) setCameras(camerasData);
+  }, [camerasData, setCameras]);
+
+  useCameraStream(activeCameraId);
 
   // Accumulate occupancy samples for the chart
   const [chartData, setChartData] = useState<
@@ -66,7 +84,7 @@ export default function AnalyticsPage() {
         {[
           {
             label: "Current Occupancy",
-            value: summary?.current_occupancy ?? 0,
+            value: frame?.occupancy ?? summary?.current_occupancy ?? 0,
             icon: <Users size={14} className="text-accent" />,
             accent: true,
           },

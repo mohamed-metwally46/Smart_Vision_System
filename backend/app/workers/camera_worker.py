@@ -38,6 +38,8 @@ FRAME_INTERVAL: float = 1.0 / MAX_FPS
 RECONNECT_DELAY: float = 3.0
 MAX_RECONNECT_ATTEMPTS: int = 10
 JPEG_QUALITY: int = 75
+ZONE_RELOAD_INTERVAL: float = 15.0
+HEATMAP_EXPORT_INTERVAL: float = 10.0
 
 
 # ── Redis channel naming convention ─────────────────────────────────────────
@@ -51,6 +53,11 @@ def alert_channel(camera_id: int | str) -> str:
 
 def event_channel(camera_id: int | str) -> str:
     return f"camera:{camera_id}:events"
+
+
+def zone_occupancy_key(zone_id: int | str) -> str:
+    """Redis key caching a zone's latest live occupancy count."""
+    return f"zone:{zone_id}:occupancy"
 
 
 # ── Payload builders ─────────────────────────────────────────────────────────
@@ -187,23 +194,53 @@ async def _load_zone_configs(camera_id: int | str) -> list:
     return configs
 
 
+async def _reload_zones(camera_id: int | str, pipeline: Pipeline, zone_state: dict) -> None:
+    """
+    Re-read zones for *camera_id* from Postgres and apply them to the running
+    pipeline in place (updates zone_state["configs"] / ["monitor"]).
+
+    Handles three cases:
+      - Monitor already running        → hot-swap its zone set (update_zones)
+      - No monitor yet, zones now exist → register a new ZoneMonitor
+      - No monitor, still no zones      → no-op
+    """
+    from backend.ai.business_logic.zone_monitor import ZoneMonitor
+
+    zone_configs = await _load_zone_configs(camera_id)
+    zone_state["configs"] = zone_configs
+
+    monitor: Optional[ZoneMonitor] = zone_state.get("monitor")
+    if monitor is not None:
+        monitor.update_zones(zone_configs)
+    elif zone_configs:
+        monitor = ZoneMonitor(zone_configs)
+        pipeline.register_analyzer(monitor)
+        zone_state["monitor"] = monitor
+        logger.info("[CameraWorker %s] ZoneMonitor registered (hot) — %d zone(s).", camera_id, len(zone_configs))
+
+    logger.info("[CameraWorker %s] Zone configs reloaded — %d zone(s).", camera_id, len(zone_configs))
+
+
 async def _configure_analyzers(
     pipeline: Pipeline,
     camera_id: int | str,
     frame_width: int = 1920,
     frame_height: int = 1080,
-) -> list:
+) -> tuple[list, Optional["ZoneMonitor"], Optional["HeatmapGenerator"]]:
     """
     Register per-camera business-logic analyzers on the pipeline.
-    Returns the loaded zone configs so the capture loop can draw them.
+    Returns (zone_configs, zone_monitor, heatmap_generator) so the capture
+    loop can draw zones and periodically hot-reload / export them.
 
     EntryExitCounter  — always registered; uses a default horizontal midline
                         scaled to the actual frame dimensions.
     ZoneMonitor       — registered only when the camera has zones in the DB.
+    HeatmapGenerator  — always registered; accumulates density for export_png().
     BehaviorAnalyzer  — always registered (loitering detection).
     """
     from backend.ai.business_logic.entry_exit_counter import EntryExitCounter
     from backend.ai.business_logic.zone_monitor import ZoneMonitor
+    from backend.ai.business_logic.heatmap_generator import HeatmapGenerator
     from backend.ai.business_logic.behavior_analyzer import BehaviorAnalyzer
 
     # ── Entry/exit counter — horizontal midline ──────────────────────────────
@@ -220,21 +257,28 @@ async def _configure_analyzers(
 
     # ── Zone monitor (DB-backed) ─────────────────────────────────────────────
     zone_configs: list = []
+    zone_monitor: Optional[ZoneMonitor] = None
     try:
         zone_configs = await _load_zone_configs(camera_id)
         if zone_configs:
-            pipeline.register_analyzer(ZoneMonitor(zone_configs))
+            zone_monitor = ZoneMonitor(zone_configs)
+            pipeline.register_analyzer(zone_monitor)
             logger.info("[CameraWorker %s] ZoneMonitor registered — %d zone(s).", camera_id, len(zone_configs))
         else:
             logger.info("[CameraWorker %s] No zones configured — ZoneMonitor skipped.", camera_id)
     except Exception as exc:
         logger.warning("[CameraWorker %s] Could not load zones: %s", camera_id, exc)
 
+    # ── Heatmap generator — always on so density data accumulates from frame 1 ──
+    heatmap_gen = HeatmapGenerator(frame_width=frame_width, frame_height=frame_height)
+    pipeline.register_analyzer(heatmap_gen)
+    logger.info("[CameraWorker %s] HeatmapGenerator registered.", camera_id)
+
     # ── Behaviour analyzer ───────────────────────────────────────────────────
     pipeline.register_analyzer(BehaviorAnalyzer())
     logger.info("[CameraWorker %s] BehaviorAnalyzer registered.", camera_id)
 
-    return zone_configs
+    return zone_configs, zone_monitor, heatmap_gen
 
 
 # ── Main worker coroutine ─────────────────────────────────────────────────────
@@ -282,6 +326,12 @@ async def run_camera_worker(
     active_pipeline: Optional[Pipeline] = pipeline  # None → build fresh each iteration
     first_connect = True
 
+    # Mutable holder so _capture_loop's periodic in-loop reload (needed because
+    # file sources never "reconnect" — see _is_file below) can update the zone
+    # set without needing a return value threaded back through the loop.
+    zone_state: dict = {"configs": [], "monitor": None}
+    heatmap_gen = None
+
     while not stop_event.is_set():
         cap = None
         try:
@@ -292,13 +342,16 @@ async def run_camera_worker(
                     weapon_model_path=settings.WEAPON_MODEL_PATH,
                     weapon_imgsz=settings.WEAPON_IMGSZ,
                 )
-                zone_configs = await _configure_analyzers(active_pipeline, camera_id, frame_width, frame_height)
+                zone_configs, zone_monitor, heatmap_gen = await _configure_analyzers(
+                    active_pipeline, camera_id, frame_width, frame_height
+                )
+                zone_state["configs"] = zone_configs
+                zone_state["monitor"] = zone_monitor
                 first_connect = False
             else:
                 # Subsequent reconnects: reload zone configs from DB so newly
                 # created zones are drawn on the stream without needing a restart.
-                zone_configs = await _load_zone_configs(camera_id)
-                logger.info("[CameraWorker %s] Zone configs reloaded — %d zone(s).", camera_id, len(zone_configs))
+                await _reload_zones(camera_id, active_pipeline, zone_state)
 
             cap = await asyncio.get_event_loop().run_in_executor(
                 None, _open_capture, source
@@ -315,7 +368,8 @@ async def run_camera_worker(
                 alert_ch=alert_ch,
                 event_ch=event_ch,
                 stop_event=stop_event,
-                zone_configs=zone_configs,
+                zone_state=zone_state,
+                heatmap_gen=heatmap_gen,
             )
 
         except asyncio.CancelledError:
@@ -361,11 +415,15 @@ async def _capture_loop(
     alert_ch: str,
     event_ch: str,
     stop_event: asyncio.Event,
-    zone_configs: list | None = None,
+    zone_state: dict | None = None,
+    heatmap_gen=None,
 ) -> None:
     """Inner frame-reading loop."""
     loop = asyncio.get_event_loop()
     last_publish_time = 0.0
+    last_zone_reload = time.monotonic()
+    last_heatmap_export = time.monotonic()
+    zone_state = zone_state if zone_state is not None else {"configs": [], "monitor": None}
 
     while not stop_event.is_set():
         ret, frame = await loop.run_in_executor(None, cap.read)
@@ -380,6 +438,17 @@ async def _capture_loop(
             await asyncio.sleep(FRAME_INTERVAL - elapsed)
             continue
 
+        # ── Periodic zone hot-reload ──────────────────────────────────────────
+        # File sources never hit the reconnect path in run_camera_worker (they
+        # just exhaust and stop), so a zone created after this worker started
+        # would otherwise never be picked up. Reload on a timer instead.
+        if now - last_zone_reload >= ZONE_RELOAD_INTERVAL:
+            last_zone_reload = now
+            try:
+                await _reload_zones(camera_id, pipeline, zone_state)
+            except Exception as exc:
+                logger.warning("[CameraWorker %s] Zone reload failed: %s", camera_id, exc)
+
         try:
             result: PipelineResult = await loop.run_in_executor(
                 None, pipeline.process_frame, frame
@@ -391,8 +460,21 @@ async def _capture_loop(
         last_publish_time = time.monotonic()
 
         # ── Draw zone overlays onto the annotated frame ──────────────────────
+        zone_configs = zone_state.get("configs") or []
         if zone_configs and result.annotated_frame is not None:
             _draw_zones(result.annotated_frame, zone_configs)
+
+        # ── Periodic heatmap export ───────────────────────────────────────────
+        if heatmap_gen is not None and now - last_heatmap_export >= HEATMAP_EXPORT_INTERVAL:
+            last_heatmap_export = now
+            try:
+                from backend.app.core.storage import HEATMAP_DIR
+                out_path = HEATMAP_DIR / f"camera_{camera_id}_latest.png"
+                await loop.run_in_executor(None, heatmap_gen.export_png, out_path)
+            except RuntimeError:
+                pass  # no centroid data accumulated yet
+            except Exception as exc:
+                logger.warning("[CameraWorker %s] Heatmap export failed: %s", camera_id, exc)
 
         # ── Publish annotated frame ──────────────────────────────────────────
         try:
@@ -411,6 +493,20 @@ async def _capture_loop(
 
         for evt in (result.business_events or []):
             evt_type = evt.get("type", "").lower()
+
+            # zone_occupancy carries live per-zone counts — cache in Redis so
+            # REST polling (Analytics page) reflects current occupancy instead
+            # of the Zone.current_occupancy DB column, which is never updated.
+            if evt_type == "zone_occupancy" and "zone_id" in evt:
+                try:
+                    await redis_client.set(
+                        zone_occupancy_key(evt["zone_id"]), evt.get("occupancy", 0)
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[CameraWorker %s] Redis zone-occupancy cache failed: %s", camera_id, exc
+                    )
+
             if "alert" in evt_type or "overcrowding" in evt_type:
                 all_alerts.append(evt)
             else:

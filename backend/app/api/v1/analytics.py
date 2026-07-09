@@ -22,7 +22,7 @@ class SummaryOut(BaseModel):
 
 class HeatmapOut(BaseModel):
     camera_id: int
-    heatmap_url: str
+    heatmap_url: str | None
 
 
 class ZoneStats(BaseModel):
@@ -69,6 +69,12 @@ async def get_summary(db: AsyncSession = Depends(get_db)):
 
 @router.get("/heatmap/{camera_id}", response_model=HeatmapOut)
 async def get_heatmap(camera_id: int):
+    from backend.app.core.storage import HEATMAP_DIR
+
+    filepath = HEATMAP_DIR / f"camera_{camera_id}_latest.png"
+    if not filepath.exists():
+        return HeatmapOut(camera_id=camera_id, heatmap_url=None)
+
     return HeatmapOut(
         camera_id=camera_id,
         heatmap_url=f"/static/heatmaps/camera_{camera_id}_latest.png",
@@ -78,17 +84,18 @@ async def get_heatmap(camera_id: int):
 @router.get("/zones/{camera_id}", response_model=ZonesOut)
 async def get_zones(camera_id: int, db: AsyncSession = Depends(get_db)):
     from backend.app.models.zone import Zone
+    from backend.app.core.redis import get_redis_client
+    from backend.app.workers.camera_worker import zone_occupancy_key
 
     result = await db.execute(select(Zone).where(Zone.camera_id == camera_id))
     zones = result.scalars().all()
-    return ZonesOut(
-        zones=[
-            ZoneStats(
-                zone_id=z.id,
-                name=z.name,
-                occupancy=z.current_occupancy,
-                threshold=z.threshold,
-            )
-            for z in zones
-        ]
-    )
+
+    redis = await get_redis_client()
+    zone_stats = []
+    for z in zones:
+        cached = await redis.get(zone_occupancy_key(z.id))
+        occupancy = int(cached) if cached is not None else z.current_occupancy
+        zone_stats.append(
+            ZoneStats(zone_id=z.id, name=z.name, occupancy=occupancy, threshold=z.threshold)
+        )
+    return ZonesOut(zones=zone_stats)

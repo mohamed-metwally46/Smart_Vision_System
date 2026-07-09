@@ -171,6 +171,31 @@ class ZoneMonitor:
 
         return output
 
+    def update_zones(self, zones: List[ZoneConfig]) -> None:
+        """
+        Replace the monitored zone set in place (hot-reload).
+
+        Preserves runtime state (occupant history, alert cooldown) for zone_ids
+        that remain across the reload; brand-new zone_ids start fresh.
+        """
+        new_zones: Dict[int, ZoneConfig] = {z.zone_id: z for z in zones}
+        new_states: Dict[int, ZoneState] = {
+            zone_id: self._states.get(zone_id, ZoneState())
+            for zone_id in new_zones
+        }
+        new_contours: Dict[int, np.ndarray] = {
+            z.zone_id: np.array(z.polygon, dtype=np.int32).reshape(-1, 1, 2)
+            for z in zones
+        }
+        self._zones = new_zones
+        self._states = new_states
+        self._contours = new_contours
+        logger.info(
+            "ZoneMonitor zones reloaded | zones=%d | ids=%s",
+            len(zones),
+            [z.zone_id for z in zones],
+        )
+
     def get_zone_state(self, zone_id: int) -> Optional[ZoneState]:
         """Return current state for *zone_id*, or None if not found."""
         return self._states.get(zone_id)
