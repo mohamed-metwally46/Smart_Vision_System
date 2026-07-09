@@ -125,6 +125,24 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _draw_zones(frame, zone_configs: list) -> None:
+    """Overlay zone polygons and labels onto the frame in-place."""
+    import numpy as np
+    color = (99, 102, 241)  # indigo — matches the frontend zone editor colour
+    for zone in zone_configs:
+        pts = [list(p) for p in zone.polygon]
+        if len(pts) < 3:
+            continue
+        pts_arr = np.array(pts, dtype=np.int32)
+        overlay = frame.copy()
+        cv2.fillPoly(overlay, [pts_arr], color)
+        cv2.addWeighted(overlay, 0.15, frame, 0.85, 0, frame)
+        cv2.polylines(frame, [pts_arr], isClosed=True, color=color, thickness=2)
+        x, y, _, _ = cv2.boundingRect(pts_arr)
+        cv2.putText(frame, zone.name, (x + 4, y + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+
+
 # ── Source helpers ────────────────────────────────────────────────────────────
 
 def _open_capture(source: str | int) -> cv2.VideoCapture:
@@ -174,9 +192,10 @@ async def _configure_analyzers(
     camera_id: int | str,
     frame_width: int = 1920,
     frame_height: int = 1080,
-) -> None:
+) -> list:
     """
     Register per-camera business-logic analyzers on the pipeline.
+    Returns the loaded zone configs so the capture loop can draw them.
 
     EntryExitCounter  — always registered; uses a default horizontal midline
                         scaled to the actual frame dimensions.
@@ -200,17 +219,22 @@ async def _configure_analyzers(
     )
 
     # ── Zone monitor (DB-backed) ─────────────────────────────────────────────
+    zone_configs: list = []
     try:
         zone_configs = await _load_zone_configs(camera_id)
         if zone_configs:
             pipeline.register_analyzer(ZoneMonitor(zone_configs))
             logger.info("[CameraWorker %s] ZoneMonitor registered — %d zone(s).", camera_id, len(zone_configs))
+        else:
+            logger.info("[CameraWorker %s] No zones configured — ZoneMonitor skipped.", camera_id)
     except Exception as exc:
         logger.warning("[CameraWorker %s] Could not load zones: %s", camera_id, exc)
 
     # ── Behaviour analyzer ───────────────────────────────────────────────────
     pipeline.register_analyzer(BehaviorAnalyzer())
     logger.info("[CameraWorker %s] BehaviorAnalyzer registered.", camera_id)
+
+    return zone_configs
 
 
 # ── Main worker coroutine ─────────────────────────────────────────────────────
@@ -226,15 +250,9 @@ async def run_camera_worker(
     if stop_event is None:
         stop_event = asyncio.Event()
 
-    if pipeline is None:
-        from backend.app.config import settings
-        pipeline = Pipeline(
-            model_path=settings.MODEL_PATH,
-            weapon_model_path=settings.WEAPON_MODEL_PATH,
-            weapon_imgsz=settings.WEAPON_IMGSZ,
-        )
+    from backend.app.config import settings
 
-    # Probe frame dimensions so EntryExitCounter midline scales correctly.
+    # Probe frame dimensions once — the source geometry doesn't change between reconnects.
     frame_width, frame_height = 1920, 1080
     try:
         cap_probe = _open_capture(source)
@@ -244,9 +262,6 @@ async def run_camera_worker(
         logger.info("[CameraWorker %s] Frame size probed: %dx%d", camera_id, frame_width, frame_height)
     except Exception as exc:
         logger.warning("[CameraWorker %s] Could not probe frame size (%s) — using %dx%d default.", camera_id, exc, frame_width, frame_height)
-
-    # Register analyzers with correct frame dimensions.
-    await _configure_analyzers(pipeline, camera_id, frame_width, frame_height)
 
     redis_client: aioredis.Redis = await aioredis.from_url(
         redis_url, encoding="utf-8", decode_responses=True
@@ -260,9 +275,31 @@ async def run_camera_worker(
 
     reconnect_attempts = 0
 
+    # When the caller supplies a pre-built pipeline we must not re-register
+    # analyzers on every reconnect (that would stack duplicates).  Instead we
+    # only rebuild the pipeline for the first connect and just reload zone
+    # configs from the DB on subsequent reconnects.
+    active_pipeline: Optional[Pipeline] = pipeline  # None → build fresh each iteration
+    first_connect = True
+
     while not stop_event.is_set():
         cap = None
         try:
+            if first_connect or active_pipeline is None:
+                # Build a fresh pipeline (loads YOLO model once).
+                active_pipeline = pipeline if pipeline is not None else Pipeline(
+                    model_path=settings.MODEL_PATH,
+                    weapon_model_path=settings.WEAPON_MODEL_PATH,
+                    weapon_imgsz=settings.WEAPON_IMGSZ,
+                )
+                zone_configs = await _configure_analyzers(active_pipeline, camera_id, frame_width, frame_height)
+                first_connect = False
+            else:
+                # Subsequent reconnects: reload zone configs from DB so newly
+                # created zones are drawn on the stream without needing a restart.
+                zone_configs = await _load_zone_configs(camera_id)
+                logger.info("[CameraWorker %s] Zone configs reloaded — %d zone(s).", camera_id, len(zone_configs))
+
             cap = await asyncio.get_event_loop().run_in_executor(
                 None, _open_capture, source
             )
@@ -272,12 +309,13 @@ async def run_camera_worker(
             await _capture_loop(
                 camera_id=camera_id,
                 cap=cap,
-                pipeline=pipeline,
+                pipeline=active_pipeline,
                 redis_client=redis_client,
                 frame_ch=frame_ch,
                 alert_ch=alert_ch,
                 event_ch=event_ch,
                 stop_event=stop_event,
+                zone_configs=zone_configs,
             )
 
         except asyncio.CancelledError:
@@ -323,6 +361,7 @@ async def _capture_loop(
     alert_ch: str,
     event_ch: str,
     stop_event: asyncio.Event,
+    zone_configs: list | None = None,
 ) -> None:
     """Inner frame-reading loop."""
     loop = asyncio.get_event_loop()
@@ -350,6 +389,10 @@ async def _capture_loop(
             continue
 
         last_publish_time = time.monotonic()
+
+        # ── Draw zone overlays onto the annotated frame ──────────────────────
+        if zone_configs and result.annotated_frame is not None:
+            _draw_zones(result.annotated_frame, zone_configs)
 
         # ── Publish annotated frame ──────────────────────────────────────────
         try:

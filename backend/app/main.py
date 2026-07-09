@@ -30,6 +30,7 @@ from backend.app.api.v1.alerts import router as alerts_router
 from backend.app.api.v1.analytics import router as analytics_router
 from backend.app.api.v1.health import router as health_router
 from backend.app.api.v1.logs import router as logs_router
+from backend.app.api.v1.zones import router as zones_router
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(analytics_router, prefix=f"{api_prefix}/analytics",         tags=["analytics"])
     app.include_router(health_router,    prefix=f"{api_prefix}/health",            tags=["health"])
     app.include_router(logs_router,      prefix=f"{api_prefix}/logs",              tags=["logs"])
+    app.include_router(zones_router,     prefix=f"{api_prefix}/zones",             tags=["zones"])
 
     # ── Static Files (Heatmaps, etc.) ─────────────────────────────────────────
     from backend.app.core.storage import STATIC_DIR

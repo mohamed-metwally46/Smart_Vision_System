@@ -117,12 +117,22 @@ export interface Track {
   bbox: [number, number, number, number]; // [x1, y1, x2, y2]
 }
 
+export interface ZoneOccupancyEvent {
+  type: "zone_occupancy" | "zone_overcrowding";
+  zone_id: number;
+  zone_name: string;
+  occupancy: number;
+  threshold: number;
+  timestamp: number;
+}
+
 export interface WSCameraFrame {
   camera_id: number;
   timestamp: string;
   frame: string; // base64 JPEG
   occupancy: number;
   tracks: Track[];
+  business_events?: ZoneOccupancyEvent[];
 }
 
 export interface WSAlert {

@@ -102,6 +102,29 @@ export default function MonitorPage() {
             </div>
           )}
 
+          {/* Zone occupancy */}
+          {frame?.business_events && frame.business_events.filter((e) => e.type === "zone_occupancy").length > 0 && (
+            <div className="panel px-4 py-2.5 flex items-center gap-4 flex-wrap">
+              <span className="stat-label">Zones</span>
+              <div className="flex gap-2 flex-wrap">
+                {frame.business_events
+                  .filter((e) => e.type === "zone_occupancy")
+                  .map((e) => (
+                    <span
+                      key={e.zone_id}
+                      className={`text-xs font-mono px-2 py-0.5 rounded border ${
+                        e.occupancy >= e.threshold
+                          ? "text-severity-high bg-severity-high/10 border-severity-high/30"
+                          : "text-ink-secondary bg-surface-600 border-transparent"
+                      }`}
+                    >
+                      {e.zone_name}: {e.occupancy}/{e.threshold}
+                    </span>
+                  ))}
+              </div>
+            </div>
+          )}
+
           {/* Track count */}
           {frame && frame.tracks.length > 0 && (
             <div className="panel px-4 py-2.5 flex items-center gap-4 flex-wrap">

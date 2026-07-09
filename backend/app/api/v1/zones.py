@@ -15,7 +15,7 @@ from backend.app.models.zone import Zone
 from backend.app.models.user import User
 from backend.app.schemas.zone import ZoneCreate, ZoneUpdate, ZoneResponse
 
-router = APIRouter(prefix="/zones", tags=["zones"])
+router = APIRouter(tags=["zones"])
 
 
 # ---------------------------------------------------------------------------
