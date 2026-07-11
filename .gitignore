@@ -34,6 +34,7 @@ models/*.pth
 models/*.onnx
 !models/README.md
 !models/*.py
+!models/weapon_final.pt
 
 # ── Generated / runtime data ──────────────────────────────────────────────────
 backend/static/heatmaps/
