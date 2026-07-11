@@ -73,7 +73,7 @@ def alert_channel(camera_id: int | str) -> str:
     return f"camera:{camera_id}:alerts"
 
 
-ALERT_SEVERITIES: frozenset[str] = frozenset({"high", "medium", "low"})
+ALERT_SEVERITIES: frozenset[str] = frozenset({"critical", "high", "medium", "low"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ class InferenceWorker:
 
     def _get_pipeline(self):
         if self._pipeline is None:
-            from ai.pipeline import AIPipeline
+            from backend.ai.pipeline import AIPipeline
             self._pipeline = AIPipeline()
             logger.info("[InferenceWorker] AIPipeline loaded.")
         return self._pipeline
@@ -202,7 +202,7 @@ class InferenceWorker:
             logger.warning("[InferenceWorker] Frame publish failed: %s", exc)
 
         # Publish alert events
-        for event in (result.events or []):
+        for event in (result.business_events or []):
             try:
                 event_dict = event_to_dict(event)
                 if event_dict.get("severity", "") in ALERT_SEVERITIES:
